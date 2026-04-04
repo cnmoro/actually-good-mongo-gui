@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback, memo } from 'react';
 import { Copy, Check, ArrowUp, ArrowDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { formatObjectId, shouldRenderAsObjectId } from '@/lib/mongo-format';
 
 function flattenKeys(obj, prefix = '') {
   const keys = [];
@@ -19,12 +20,15 @@ function resolveField(obj, path) {
   return path.split('.').reduce((o, k) => o?.[k], obj);
 }
 
-function CellValue({ value }) {
+function CellValue({ value, fieldName }) {
   if (value === null) return <span className="text-rose-400/70 italic">null</span>;
   if (value === undefined) return <span className="text-muted-foreground/50">—</span>;
   if (typeof value === 'boolean') return <span className="text-amber-400">{String(value)}</span>;
   if (typeof value === 'number') return <span className="text-sky-400">{value}</span>;
   if (typeof value === 'string') {
+    if (shouldRenderAsObjectId(value, fieldName)) {
+      return <span className="text-orange-300">{formatObjectId(value)}</span>;
+    }
     if (value.length > 100) return <span className="text-foreground/80" title={value}>{value.slice(0, 100)}…</span>;
     return <span className="text-foreground/80">{value}</span>;
   }
@@ -44,7 +48,7 @@ const GridRow = memo(function GridRow({ doc, columns, isEven, onClick }) {
     >
       {columns.map(col => (
         <td key={col} className="px-3 py-1.5 text-xs font-mono whitespace-nowrap max-w-[300px] overflow-hidden text-ellipsis">
-          <CellValue value={resolveField(doc, col)} />
+          <CellValue value={resolveField(doc, col)} fieldName={col} />
         </td>
       ))}
     </tr>

@@ -11,7 +11,9 @@
     "better-sqlite3": "^11.8.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "fast-xml-parser": "^5.5.10",
     "json5": "^2.2.3",
-    "mongodb": "^6.16.0"
+    "mongodb": "^6.16.0",
+    "xlsx": "^0.18.5"
   }
 }

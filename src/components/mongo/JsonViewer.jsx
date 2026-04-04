@@ -1,15 +1,19 @@
 import { useState, useMemo, useCallback, memo } from 'react';
 import { ChevronRight, ChevronDown, Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { formatObjectId, shouldRenderAsObjectId, toMongoShellString } from '@/lib/mongo-format';
 
 const MAX_INLINE_LENGTH = 60;
 
-function JsonValue({ value, depth = 0 }) {
+function JsonValue({ value, depth = 0, fieldName = '' }) {
   if (value === null) return <span className="text-rose-400">null</span>;
   if (value === undefined) return <span className="text-muted-foreground">undefined</span>;
   if (typeof value === 'boolean') return <span className="text-amber-400">{String(value)}</span>;
   if (typeof value === 'number') return <span className="text-sky-400">{value}</span>;
   if (typeof value === 'string') {
+    if (shouldRenderAsObjectId(value, fieldName)) {
+      return <span className="text-orange-300">{formatObjectId(value)}</span>;
+    }
     if (value.length > 200) {
       return <span className="text-emerald-400">"{value.slice(0, 200)}..."</span>;
     }
@@ -80,7 +84,7 @@ function JsonObject({ value, depth }) {
             {i > 0 && <span className="text-muted-foreground">, </span>}
             <span className="text-violet-400">{k}</span>
             <span className="text-muted-foreground">: </span>
-            <JsonValue value={value[k]} depth={depth + 1} />
+            <JsonValue value={value[k]} depth={depth + 1} fieldName={k} />
           </span>
         ))}
         <span className="text-muted-foreground">{'}'}</span>
@@ -101,7 +105,7 @@ function JsonObject({ value, depth }) {
             <div key={k} className="leading-5">
               <span className="text-violet-400">{k}</span>
               <span className="text-muted-foreground">: </span>
-              <JsonValue value={value[k]} depth={depth + 1} />
+              <JsonValue value={value[k]} depth={depth + 1} fieldName={k} />
               {i < keys.length - 1 && <span className="text-muted-foreground">,</span>}
             </div>
           ))}
@@ -140,7 +144,7 @@ const DocumentCard = memo(function DocumentCard({ doc, index, selected, onClick 
     >
       <div className="flex items-center justify-between mb-1">
         <span className="text-[10px] font-mono text-muted-foreground">
-          {doc._id ? `_id: ${doc._id}` : `Document ${index}`}
+          {doc._id ? `_id: ${shouldRenderAsObjectId(doc._id, '_id') ? formatObjectId(doc._id) : doc._id}` : `Document ${index}`}
         </span>
         <CopyButton text={jsonStr} />
       </div>
@@ -161,13 +165,13 @@ export default function JsonViewer({ documents, viewMode = 'json', onDocumentCli
   }
 
   if (viewMode === 'raw') {
-    const rawJson = JSON.stringify(documents, null, 2);
+    const rawJson = toMongoShellString(documents, 2);
     return (
-      <div className="relative">
+      <div className="relative h-full min-h-0">
         <div className="absolute top-2 right-2 z-10">
           <CopyButton text={rawJson} />
         </div>
-        <pre className="text-xs font-mono p-4 overflow-auto max-h-[600px] leading-5 text-foreground/90">
+        <pre className="h-full min-h-0 text-xs font-mono p-4 overflow-auto leading-5 text-foreground/90">
           {rawJson}
         </pre>
       </div>

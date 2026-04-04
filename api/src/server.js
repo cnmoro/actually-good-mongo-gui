@@ -1,11 +1,13 @@
 import cors from "cors";
 import Database from "better-sqlite3";
 import express from "express";
+import { XMLParser } from "fast-xml-parser";
 import JSON5 from "json5";
 import { MongoClient, ObjectId } from "mongodb";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import XLSX from "xlsx";
 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
@@ -187,6 +189,21 @@ function serializeForJson(value) {
   return value;
 }
 
+function reviveMongoLiterals(value) {
+  if (Array.isArray(value)) return value.map(reviveMongoLiterals);
+  if (value && typeof value === "object") {
+    if (Object.prototype.hasOwnProperty.call(value, "__webmongoObjectId")) {
+      const hex = String(value.__webmongoObjectId || "");
+      if (ObjectId.isValid(hex)) return new ObjectId(hex);
+      return value;
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = reviveMongoLiterals(v);
+    return out;
+  }
+  return value;
+}
+
 function csvEscape(value) {
   const text = value == null ? "" : String(value);
   return `"${text.replaceAll('"', '""')}"`;
@@ -207,6 +224,161 @@ function rowsToCsv(rows) {
         .join(",")
     ),
   ].join("\n");
+}
+
+function parseCsvLine(line) {
+  const values = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1];
+
+    if (ch === '"' && inQuotes && next === '"') {
+      current += '"';
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (ch === "," && !inQuotes) {
+      values.push(current);
+      current = "";
+      continue;
+    }
+
+    current += ch;
+  }
+
+  values.push(current);
+  return values;
+}
+
+function csvToRows(payload) {
+  const lines = String(payload || "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim());
+  if (!lines.length) return [];
+  const headers = parseCsvLine(lines[0]).map((h) => h.trim());
+  return lines.slice(1).map((line) => {
+    const cols = parseCsvLine(line);
+    const row = {};
+    headers.forEach((header, idx) => {
+      row[header] = cols[idx] ?? "";
+    });
+    return row;
+  });
+}
+
+function flattenAnyToDocs(value) {
+  if (Array.isArray(value)) return value.flatMap(flattenAnyToDocs);
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    const scalarCount = entries.filter(([, v]) => v == null || typeof v !== "object").length;
+    if (entries.length > 0 && scalarCount === entries.length) return [value];
+    return entries.flatMap(([, v]) => flattenAnyToDocs(v));
+  }
+  return [];
+}
+
+function parseSingleCollectionImport(payload, format) {
+  if (format === "csv" || format === "excel") return csvToRows(payload);
+
+  if (format === "xml") {
+    const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
+    const parsed = parser.parse(String(payload || ""));
+    return flattenAnyToDocs(parsed);
+  }
+
+  if (format === "xlsx") {
+    const workbook = XLSX.read(Buffer.from(String(payload || ""), "base64"), { type: "buffer" });
+    const firstSheet = workbook.SheetNames[0];
+    if (!firstSheet) return [];
+    return XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { defval: null });
+  }
+
+  const parsed = parseLooseJSON(payload, []);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function parseDatabaseImportPayload(payload, format, fallbackCollection = "imported_data") {
+  if (format === "json" || format === "bson") {
+    const parsed = parseLooseJSON(payload, null);
+    if (!parsed || typeof parsed !== "object") return null;
+    const collectionsMap = parsed.collections && typeof parsed.collections === "object" ? parsed.collections : parsed;
+    const out = {};
+    for (const [name, docsRaw] of Object.entries(collectionsMap || {})) {
+      if (Array.isArray(docsRaw)) out[name] = docsRaw;
+    }
+    return out;
+  }
+
+  const rows = parseSingleCollectionImport(payload, format);
+  const grouped = {};
+
+  rows.forEach((row) => {
+    const collection = String(row?._collection || fallbackCollection).trim() || fallbackCollection;
+    const next = { ...(row || {}) };
+    delete next._collection;
+    if (!grouped[collection]) grouped[collection] = [];
+    grouped[collection].push(next);
+  });
+
+  return grouped;
+}
+
+function getRoleActionsByAccess(access) {
+  if (access === "readWrite") {
+    return [
+      "find",
+      "insert",
+      "update",
+      "remove",
+      "listIndexes",
+      "listCollections",
+      "createIndex",
+      "dropIndex",
+      "collStats",
+      "dbStats",
+    ];
+  }
+  return ["find", "listIndexes", "listCollections", "collStats", "dbStats"];
+}
+
+async function upsertCollectionScopedRole(db, roleName, collectionName, access) {
+  const privileges = [
+    {
+      resource: { db: db.databaseName, collection: collectionName },
+      actions: getRoleActionsByAccess(access),
+    },
+  ];
+
+  try {
+    await db.command({
+      createRole: roleName,
+      privileges,
+      roles: [],
+    });
+  } catch (error) {
+    if (!String(error?.message || "").toLowerCase().includes("already exists")) throw error;
+    await db.command({
+      updateRole: roleName,
+      privileges,
+      roles: [],
+    });
+  }
+}
+
+function sanitizeRoleToken(value) {
+  return String(value || "")
+    .replace(/[^a-zA-Z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
 }
 
 function parseShellCommand(command) {
@@ -532,15 +704,13 @@ app.post("/api/databases/:database/import", async (req, res, next) => {
   try {
     const connectionId = String(req.body.connectionId || "");
     const targetDatabase = String(req.body.targetDatabase || req.params.database).trim();
+    const format = String(req.body.format || "json").toLowerCase();
     const payload = String(req.body.payload || "");
     if (!payload.trim()) return res.status(400).json({ error: "payload is required" });
-
-    const parsed = parseLooseJSON(payload, null);
-    if (!parsed || typeof parsed !== "object") {
+    const collectionsMap = parseDatabaseImportPayload(payload, format, req.body.defaultCollection || "imported_data");
+    if (!collectionsMap || typeof collectionsMap !== "object") {
       return res.status(400).json({ error: "Invalid database import payload" });
     }
-
-    const collectionsMap = parsed.collections && typeof parsed.collections === "object" ? parsed.collections : parsed;
     const { client } = await getConnectedClientByConnectionId(connectionId);
     const db = client.db(targetDatabase);
 
@@ -701,29 +871,340 @@ app.post("/api/databases/:database/collections/:collection/import", async (req, 
     const existing = await db.listCollections({ name: targetCollection }, { nameOnly: true }).toArray();
     if (!existing.length) await db.createCollection(targetCollection);
 
-    let docs = [];
-    if (format === "csv" || format === "excel") {
-      const lines = payload.split(/\r?\n/).filter(Boolean);
-      const headers = (lines.shift() || "").split(",").map((h) => h.replace(/^"|"$/g, ""));
-      docs = lines.map((line) => {
-        const cols = line.split(",");
-        const doc = {};
-        headers.forEach((h, idx) => {
-          const val = (cols[idx] || "").replace(/^"|"$/g, "");
-          doc[h] = val;
-        });
-        return doc;
-      });
-    } else {
-      const parsed = parseLooseJSON(payload, []);
-      docs = Array.isArray(parsed) ? parsed : [parsed];
-    }
+    const docs = parseSingleCollectionImport(payload, format);
 
     if (docs.length) {
       await db.collection(targetCollection).insertMany(docs, { ordered: false }).catch(() => undefined);
     }
 
     res.json({ ok: true, importedCount: docs.length, targetCollection });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/databases/:database/collections/:collection/mongodump", async (req, res, next) => {
+  try {
+    const connectionId = String(req.query.connectionId || "");
+    const includeIndexes = String(req.query.includeIndexes || "true") !== "false";
+    const includeMetadata = String(req.query.includeMetadata || "true") !== "false";
+    const { client } = await getConnectedClientByConnectionId(connectionId);
+    const db = client.db(req.params.database);
+    const coll = db.collection(req.params.collection);
+
+    const docs = await coll.find({}, { limit: 100000 }).toArray();
+    const out = {
+      type: "mongodump-collection",
+      database: req.params.database,
+      collection: req.params.collection,
+      dumpedAt: new Date().toISOString(),
+      metadata: includeMetadata ? await db.command({ collStats: req.params.collection, scale: 1 }).catch(() => null) : undefined,
+      indexes: includeIndexes ? await coll.indexes().catch(() => []) : [],
+      documents: serializeForJson(docs.map((doc) => ({ ...doc, _id: encodeDocId(doc._id) }))),
+    };
+
+    res.json({ ok: true, data: JSON.stringify(out, null, 2) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/databases/:database/mongodump", async (req, res, next) => {
+  try {
+    const connectionId = String(req.query.connectionId || "");
+    const includeIndexes = String(req.query.includeIndexes || "true") !== "false";
+    const includeMetadata = String(req.query.includeMetadata || "true") !== "false";
+    const { client } = await getConnectedClientByConnectionId(connectionId);
+    const db = client.db(req.params.database);
+    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+
+    const out = {
+      type: "mongodump-database",
+      database: req.params.database,
+      dumpedAt: new Date().toISOString(),
+      collections: {},
+    };
+
+    for (const item of collections) {
+      const coll = db.collection(item.name);
+      const docs = await coll.find({}, { limit: 100000 }).toArray();
+      out.collections[item.name] = {
+        metadata: includeMetadata ? await db.command({ collStats: item.name, scale: 1 }).catch(() => null) : undefined,
+        indexes: includeIndexes ? await coll.indexes().catch(() => []) : [],
+        documents: serializeForJson(docs.map((doc) => ({ ...doc, _id: encodeDocId(doc._id) }))),
+      };
+    }
+
+    res.json({ ok: true, data: JSON.stringify(out, null, 2) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/databases/:database/security/overview", async (req, res, next) => {
+  try {
+    const connectionId = String(req.query.connectionId || "");
+    const database = String(req.params.database || "");
+    const { client } = await getConnectedClientByConnectionId(connectionId);
+    const db = client.db(database);
+    const adminDb = client.db("admin");
+    const collections = await db.listCollections({}, { nameOnly: true }).toArray();
+    const usersInfo = await db.command({ usersInfo: 1, showPrivileges: true }).catch(() => ({ users: [] }));
+    const rolesInfo = await db.command({ rolesInfo: 1, showBuiltinRoles: true }).catch(() => ({ roles: [] }));
+
+    let users = Array.isArray(usersInfo.users) ? usersInfo.users : [];
+    let roles = Array.isArray(rolesInfo.roles) ? rolesInfo.roles : [];
+
+    if (!users.length) {
+      const rawUsers = await adminDb
+        .collection("system.users")
+        .find({ db: { $in: [database, "admin"] } }, { projection: { user: 1, db: 1, roles: 1 } })
+        .toArray()
+        .catch(() => []);
+
+      users = rawUsers.map((user) => ({
+        user: user.user,
+        db: user.db,
+        roles: user.roles || [],
+        inheritedRoles: [],
+      }));
+    }
+
+    if (!roles.length) {
+      const rawRoles = await adminDb
+        .collection("system.roles")
+        .find({ db: { $in: [database, "admin"] } }, { projection: { role: 1, db: 1, isBuiltin: 1 } })
+        .toArray()
+        .catch(() => []);
+
+      roles = rawRoles.map((role) => ({
+        role: role.role,
+        db: role.db,
+        isBuiltin: Boolean(role.isBuiltin),
+      }));
+    }
+
+    res.json({
+      ok: true,
+      database,
+      collections: collections.map((item) => item.name),
+      users: users.map((user) => ({
+        user: user.user,
+        db: user.db,
+        roles: user.roles || [],
+        inheritedRoles: user.inheritedRoles || [],
+      })),
+      roles: roles.map((role) => ({
+        role: role.role,
+        db: role.db,
+        isBuiltin: role.isBuiltin,
+      })),
+      presets: {
+        global: [
+          { value: "root", db: "admin", label: "Root (Full admin)" },
+          { value: "userAdminAnyDatabase", db: "admin", label: "User Admin Any DB" },
+          { value: "readWriteAnyDatabase", db: "admin", label: "Read/Write Any DB" },
+          { value: "readAnyDatabase", db: "admin", label: "Read Any DB" },
+        ],
+        database: [
+          { value: "dbAdmin", db: database, label: "DB Admin" },
+          { value: "userAdmin", db: database, label: "User Admin" },
+          { value: "readWrite", db: database, label: "Read/Write (entire DB)" },
+          { value: "read", db: database, label: "Read only (entire DB)" },
+        ],
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/databases/:database/security/users", async (req, res, next) => {
+  try {
+    const connectionId = String(req.body.connectionId || "");
+    const database = String(req.params.database || "");
+    const username = String(req.body.username || "").trim();
+    const password = String(req.body.password || "");
+    const userType = String(req.body.userType || "custom");
+    const grants = Array.isArray(req.body.grants) ? req.body.grants : [];
+    const presetRoles = Array.isArray(req.body.presetRoles) ? req.body.presetRoles : [];
+    if (!username) return res.status(400).json({ error: "username is required" });
+
+    const { client } = await getConnectedClientByConnectionId(connectionId);
+    const db = client.db(database);
+    const usersInfo = await db.command({ usersInfo: username }).catch(() => ({ users: [] }));
+    const userExists = Array.isArray(usersInfo.users) && usersInfo.users.length > 0;
+
+    const roles = [];
+
+    if (userType === "masterAdmin") {
+      roles.push({ role: "root", db: "admin" });
+    } else {
+      presetRoles.forEach((item) => {
+        if (item?.role && item?.db) roles.push({ role: String(item.role), db: String(item.db) });
+      });
+
+      for (const grant of grants) {
+        const collection = String(grant?.collection || "").trim();
+        const access = String(grant?.access || "read");
+        if (!collection) continue;
+
+        if (collection === "*") {
+          roles.push({ role: access === "readWrite" ? "readWrite" : "read", db: database });
+          continue;
+        }
+
+        const roleName = `webgui_${sanitizeRoleToken(database)}_${sanitizeRoleToken(collection)}_${sanitizeRoleToken(access)}`;
+        await upsertCollectionScopedRole(db, roleName, collection, access === "readWrite" ? "readWrite" : "read");
+        roles.push({ role: roleName, db: database });
+      }
+    }
+
+    const dedupedRoles = Array.from(new Map(roles.map((r) => [`${r.db}.${r.role}`, r])).values());
+
+    if (!userExists) {
+      if (!password) return res.status(400).json({ error: "password is required for new users" });
+      await db.command({
+        createUser: username,
+        pwd: password,
+        roles: dedupedRoles,
+      });
+    } else {
+      const updatePayload = {
+        updateUser: username,
+        roles: dedupedRoles,
+      };
+      if (password) updatePayload.pwd = password;
+      await db.command(updatePayload);
+    }
+
+    res.json({ ok: true, username, database, roles: dedupedRoles, userType });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/databases/:database/security/users/:username", async (req, res, next) => {
+  try {
+    const connectionId = String(req.query.connectionId || "");
+    const database = String(req.params.database || "");
+    const username = String(req.params.username || "");
+    const { client } = await getConnectedClientByConnectionId(connectionId);
+    const db = client.db(database);
+    await db.command({ dropUser: username });
+    res.json({ ok: true, username, database });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/data-transfer", async (req, res, next) => {
+  try {
+    const sourceConnectionId = String(req.body.sourceConnectionId || "");
+    const targetConnectionId = String(req.body.targetConnectionId || "");
+    const sourceDatabase = String(req.body.sourceDatabase || "");
+    const targetDatabase = String(req.body.targetDatabase || sourceDatabase);
+    const sourceCollection = req.body.sourceCollection ? String(req.body.sourceCollection) : "";
+    const targetCollection = req.body.targetCollection ? String(req.body.targetCollection) : "";
+    const mode = String(req.body.mode || "append");
+    const batchSizeRaw = Number(req.body.batchSize || 2000);
+    const batchSize = Number.isFinite(batchSizeRaw) ? Math.max(100, Math.min(batchSizeRaw, 20000)) : 2000;
+
+    if (!sourceConnectionId || !targetConnectionId || !sourceDatabase || !targetDatabase) {
+      return res.status(400).json({ error: "sourceConnectionId, targetConnectionId, sourceDatabase and targetDatabase are required" });
+    }
+
+    const [{ client: sourceClient }, { client: targetClient }] = await Promise.all([
+      getConnectedClientByConnectionId(sourceConnectionId),
+      getConnectedClientByConnectionId(targetConnectionId),
+    ]);
+
+    const sourceDb = sourceClient.db(sourceDatabase);
+    const targetDb = targetClient.db(targetDatabase);
+
+    const insertChunk = async (targetColl, docs) => {
+      if (!docs.length) return 0;
+      try {
+        const result = await targetColl.insertMany(docs, { ordered: false });
+        return Number(result?.insertedCount || docs.length);
+      } catch (error) {
+        const inserted =
+          Number(error?.result?.result?.nInserted) ||
+          Number(error?.result?.nInserted) ||
+          0;
+        return inserted;
+      }
+    };
+
+    const transferCollection = async (fromName, toName) => {
+      if (
+        mode === "replace" &&
+        sourceConnectionId === targetConnectionId &&
+        sourceDatabase === targetDatabase &&
+        fromName === toName
+      ) {
+        throw new Error("Cannot use replace mode when source and target are the same collection");
+      }
+
+      const from = sourceDb.collection(fromName);
+      const to = targetDb.collection(toName);
+      const exists = await targetDb.listCollections({ name: toName }, { nameOnly: true }).toArray();
+      if (!exists.length) await targetDb.createCollection(toName);
+
+      if (mode === "replace") {
+        await to.deleteMany({});
+      }
+
+      const cursor = from.find({}, { noCursorTimeout: true, batchSize });
+      let chunk = [];
+      let insertedTotal = 0;
+
+      try {
+        for await (const doc of cursor) {
+          chunk.push(doc);
+          if (chunk.length >= batchSize) {
+            insertedTotal += await insertChunk(to, chunk);
+            chunk = [];
+          }
+        }
+      } finally {
+        await cursor.close().catch(() => undefined);
+      }
+
+      if (chunk.length) {
+        insertedTotal += await insertChunk(to, chunk);
+      }
+
+      return insertedTotal;
+    };
+
+    let collectionsProcessed = 0;
+    let documentsTransferred = 0;
+
+    if (sourceCollection) {
+      const mappedTarget = targetCollection || sourceCollection;
+      documentsTransferred += await transferCollection(sourceCollection, mappedTarget);
+      collectionsProcessed = 1;
+    } else {
+      const collections = await sourceDb.listCollections({}, { nameOnly: true }).toArray();
+      for (const coll of collections) {
+        documentsTransferred += await transferCollection(coll.name, coll.name);
+        collectionsProcessed += 1;
+      }
+    }
+
+    res.json({
+      ok: true,
+      sourceConnectionId,
+      targetConnectionId,
+      sourceDatabase,
+      targetDatabase,
+      sourceCollection: sourceCollection || null,
+      targetCollection: targetCollection || null,
+      mode,
+      collectionsProcessed,
+      documentsTransferred,
+    });
   } catch (error) {
     next(error);
   }
@@ -865,7 +1346,7 @@ app.post("/api/aggregate/execute", async (req, res, next) => {
     const { client } = await getConnectedClientByConnectionId(String(connectionId || ""));
     const coll = client.db(database).collection(collection);
 
-    const parsedPipeline = Array.isArray(pipeline) ? pipeline : parseLooseJSON(pipeline, []);
+    const parsedPipeline = reviveMongoLiterals(Array.isArray(pipeline) ? pipeline : parseLooseJSON(pipeline, []));
     const stagesCount = stopAtStage >= 0 ? Math.min(stopAtStage + 1, parsedPipeline.length) : parsedPipeline.length;
 
     let currentPipeline = [];
@@ -917,7 +1398,7 @@ app.post("/api/aggregate/explain", async (req, res, next) => {
     const { connectionId, database, collection, pipeline = [] } = req.body || {};
     const { client } = await getConnectedClientByConnectionId(String(connectionId || ""));
     const coll = client.db(database).collection(collection);
-    const parsedPipeline = Array.isArray(pipeline) ? pipeline : parseLooseJSON(pipeline, []);
+    const parsedPipeline = reviveMongoLiterals(Array.isArray(pipeline) ? pipeline : parseLooseJSON(pipeline, []));
 
     const explainDoc = await coll.aggregate(parsedPipeline, { allowDiskUse: true }).explain("executionStats");
 

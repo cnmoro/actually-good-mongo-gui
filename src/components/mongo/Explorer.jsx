@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ChevronRight, ChevronDown, Database, Table, Terminal, GitBranch, Search, List, Plug, RefreshCw, Plus, Trash2 } from 'lucide-react';
+import { ChevronRight, ChevronDown, Database, Table, Terminal, GitBranch, Search, List, Plug, RefreshCw, Plus, Trash2, ShieldCheck, ArchiveRestore } from 'lucide-react';
 import { MongoApi } from '@/lib/mongo-api';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -45,6 +45,24 @@ export default function Explorer({ activeConnections, connections, explorerState
   const [indexTtlSeconds, setIndexTtlSeconds] = useState('3600');
   const [indexPartialEnabled, setIndexPartialEnabled] = useState(false);
   const [indexPartialFilter, setIndexPartialFilter] = useState('{"status":"ACTIVE"}');
+  const [importWizard, setImportWizard] = useState({ open: false, scope: null, payload: null });
+  const [importStep, setImportStep] = useState(1);
+  const [importExtension, setImportExtension] = useState('json');
+  const [importEncoding, setImportEncoding] = useState('utf-8');
+  const [importTargetName, setImportTargetName] = useState('');
+  const [dumpWizard, setDumpWizard] = useState({ open: false, scope: null, payload: null });
+  const [dumpIncludeIndexes, setDumpIncludeIndexes] = useState(true);
+  const [dumpIncludeMetadata, setDumpIncludeMetadata] = useState(true);
+  const [securityWizard, setSecurityWizard] = useState({ open: false, payload: null });
+  const [securityLoading, setSecurityLoading] = useState(false);
+  const [securityOverview, setSecurityOverview] = useState(null);
+  const [securitySelectedUser, setSecuritySelectedUser] = useState('');
+  const [securityUsername, setSecurityUsername] = useState('');
+  const [securityPassword, setSecurityPassword] = useState('');
+  const [securityUserType, setSecurityUserType] = useState('custom');
+  const [securityPresetRole, setSecurityPresetRole] = useState('');
+  const [securityGrants, setSecurityGrants] = useState([{ collection: '*', access: 'read' }]);
+  const [securityConfirm, setSecurityConfirm] = useState({ open: false, action: null, message: '' });
 
   const INDEX_TYPE_OPTIONS = [
     { value: '1', label: 'Ascending (1)' },
@@ -59,10 +77,32 @@ export default function Explorer({ activeConnections, connections, explorerState
   const inferFormatFromFile = useCallback((fileName, fallback = 'json') => {
     const name = String(fileName || '').toLowerCase();
     if (name.endsWith('.csv')) return 'csv';
-    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel';
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'xlsx';
+    if (name.endsWith('.xml')) return 'xml';
     if (name.endsWith('.bson')) return 'bson';
     if (name.endsWith('.json')) return 'json';
     return fallback;
+  }, []);
+
+  const isTextImportType = importExtension === 'csv' || importExtension === 'json' || importExtension === 'xml';
+
+  const openImportWizard = useCallback((scope, payload) => {
+    setImportWizard({ open: true, scope, payload });
+    setImportStep(1);
+    setImportExtension('json');
+    setImportEncoding('utf-8');
+    setImportFile(null);
+    if (scope === 'database') {
+      setImportTargetName(payload.dbName);
+    } else {
+      setImportTargetName(payload.collName);
+    }
+  }, []);
+
+  const openDumpWizard = useCallback((scope, payload) => {
+    setDumpWizard({ open: true, scope, payload });
+    setDumpIncludeIndexes(true);
+    setDumpIncludeMetadata(true);
   }, []);
 
   const loadDatabases = useCallback(async (connId) => {
@@ -125,6 +165,90 @@ export default function Explorer({ activeConnections, connections, explorerState
     if (dbName) await loadCollections(connId, dbName);
   }, [loadCollections, loadDatabases]);
 
+  const hydrateSecurityEditor = useCallback((overview, username) => {
+    const selected = (overview?.users || []).find((user) => user.user === username);
+    setSecuritySelectedUser(username || '');
+    setSecurityUsername(username || '');
+    setSecurityPassword('');
+    const hasRoot = (selected?.roles || []).some((role) => role.role === 'root' && role.db === 'admin');
+    setSecurityUserType(hasRoot ? 'masterAdmin' : 'custom');
+    setSecurityPresetRole('');
+    setSecurityGrants([{ collection: '*', access: 'read' }]);
+  }, []);
+
+  const openSecurityWizard = useCallback(async (payload) => {
+    setSecurityWizard({ open: true, payload });
+    setSecurityLoading(true);
+    try {
+      const overview = await MongoApi.getSecurityOverview(payload.connId, payload.dbName);
+      setSecurityOverview(overview);
+      const firstUser = overview?.users?.[0]?.user || '';
+      hydrateSecurityEditor(overview, firstUser);
+    } finally {
+      setSecurityLoading(false);
+    }
+  }, [hydrateSecurityEditor]);
+
+  const removeSelectedUser = useCallback(async () => {
+    if (!securitySelectedUser || !securityWizard.payload) return;
+    await MongoApi.removeDatabaseUser(securityWizard.payload.connId, securityWizard.payload.dbName, securitySelectedUser);
+    const refreshed = await MongoApi.getSecurityOverview(securityWizard.payload.connId, securityWizard.payload.dbName);
+    setSecurityOverview(refreshed);
+    const nextUser = refreshed?.users?.[0]?.user || '';
+    hydrateSecurityEditor(refreshed, nextUser);
+  }, [securitySelectedUser, securityWizard.payload, hydrateSecurityEditor]);
+
+  const saveUserSecurity = useCallback(async () => {
+    if (!securityWizard.payload) return;
+    const presetRoles = [];
+    if (securityPresetRole) {
+      const [db, role] = securityPresetRole.split('::');
+      if (db && role) presetRoles.push({ db, role });
+    }
+
+    await MongoApi.upsertDatabaseUser(securityWizard.payload.connId, securityWizard.payload.dbName, {
+      username: securityUsername.trim(),
+      password: securityPassword,
+      userType: securityUserType,
+      grants: securityGrants.filter((item) => item.collection && item.access),
+      presetRoles,
+    });
+
+    const refreshed = await MongoApi.getSecurityOverview(securityWizard.payload.connId, securityWizard.payload.dbName);
+    setSecurityOverview(refreshed);
+    hydrateSecurityEditor(refreshed, securityUsername.trim());
+  }, [securityWizard.payload, securityPresetRole, securityUsername, securityPassword, securityUserType, securityGrants, hydrateSecurityEditor]);
+
+  const openSecurityConfirm = useCallback((action) => {
+    if (action === 'remove') {
+      setSecurityConfirm({
+        open: true,
+        action,
+        message: `Delete user '${securitySelectedUser}' from this database? This cannot be undone.`,
+      });
+      return;
+    }
+
+    const userExists = (securityOverview?.users || []).some((user) => user.user === securityUsername.trim());
+    setSecurityConfirm({
+      open: true,
+      action,
+      message: userExists
+        ? `Update user '${securityUsername.trim()}' permissions and roles?`
+        : `Create new user '${securityUsername.trim()}' with the selected permissions and roles?`,
+    });
+  }, [securityOverview?.users, securitySelectedUser, securityUsername]);
+
+  const submitSecurityConfirm = useCallback(async () => {
+    if (securityConfirm.action === 'remove') {
+      await removeSelectedUser();
+    }
+    if (securityConfirm.action === 'save') {
+      await saveUserSecurity();
+    }
+    setSecurityConfirm({ open: false, action: null, message: '' });
+  }, [securityConfirm.action, removeSelectedUser, saveUserSecurity]);
+
   const handleConnectionAction = useCallback(async (type, payload) => {
     if (type === 'createDatabaseWithCollection') {
       setPromptState({ open: true, type, payload });
@@ -178,10 +302,17 @@ export default function Explorer({ activeConnections, connections, explorerState
     }
 
     if (type === 'importDatabase') {
-      setPromptState({ open: true, type, payload });
-      setPromptValue('json');
-      setPromptValue2(payload.dbName);
-      setImportFile(null);
+      openImportWizard('database', payload);
+      return;
+    }
+
+    if (type === 'mongodumpDatabase') {
+      openDumpWizard('database', payload);
+      return;
+    }
+
+    if (type === 'manageUsersRoles') {
+      await openSecurityWizard(payload);
       return;
     }
 
@@ -194,7 +325,7 @@ export default function Explorer({ activeConnections, connections, explorerState
     if (type === 'refresh') {
       await refreshDatabaseTree(payload.connId, payload.dbName);
     }
-  }, [refreshDatabaseTree]);
+  }, [openDumpWizard, openImportWizard, openSecurityWizard, refreshDatabaseTree]);
 
   const handleCollectionAction = useCallback(async (type, payload) => {
     if (type === 'stats') {
@@ -209,11 +340,10 @@ export default function Explorer({ activeConnections, connections, explorerState
       type === 'renameCollection' ||
       type === 'createIndex' ||
       type === 'exportCollection' ||
-      type === 'importCollection' ||
       type === 'createCollection'
     ) {
       setPromptState({ open: true, type, payload });
-      setPromptValue(type === 'renameCollection' ? payload.collName : (type === 'exportCollection' || type === 'importCollection' ? 'json' : ''));
+      setPromptValue(type === 'renameCollection' ? payload.collName : (type === 'exportCollection' ? 'json' : ''));
       setPromptValue2('');
       setPromptValue3('');
       setImportFile(null);
@@ -232,6 +362,16 @@ export default function Explorer({ activeConnections, connections, explorerState
       return;
     }
 
+    if (type === 'importCollection') {
+      openImportWizard('collection', payload);
+      return;
+    }
+
+    if (type === 'mongodumpCollection') {
+      openDumpWizard('collection', payload);
+      return;
+    }
+
     if (type === 'dropCollection' || type === 'wipeCollection') {
       setConfirmState({ open: true, type, payload });
       return;
@@ -240,7 +380,7 @@ export default function Explorer({ activeConnections, connections, explorerState
     if (type === 'refresh') {
       await refreshDatabaseTree(payload.connId, payload.dbName);
     }
-  }, [refreshDatabaseTree]);
+  }, [openDumpWizard, openImportWizard, refreshDatabaseTree]);
 
   const submitPromptAction = useCallback(async () => {
     const { type, payload } = promptState;
@@ -387,6 +527,82 @@ export default function Explorer({ activeConnections, connections, explorerState
     setConfirmState({ open: false, type: null, payload: null });
   }, [confirmState, refreshDatabaseTree]);
 
+  const readImportPayload = useCallback(async () => {
+    if (!importFile) throw new Error('Select a file to import');
+    if (importExtension === 'xlsx') {
+      const bytes = await importFile.arrayBuffer();
+      const chars = new Uint8Array(bytes);
+      let binary = '';
+      for (let i = 0; i < chars.length; i += 1) {
+        binary += String.fromCharCode(chars[i]);
+      }
+      return btoa(binary);
+    }
+
+    const buffer = await importFile.arrayBuffer();
+    const decoder = new TextDecoder(importEncoding);
+    return decoder.decode(buffer);
+  }, [importFile, importExtension, importEncoding]);
+
+  const submitImportWizard = useCallback(async () => {
+    if (!importWizard.payload) return;
+    const payload = await readImportPayload();
+    const format = importExtension;
+
+    if (importWizard.scope === 'database') {
+      await MongoApi.importDatabase(
+        importWizard.payload.connId,
+        importWizard.payload.dbName,
+        payload,
+        importTargetName || importWizard.payload.dbName,
+        format
+      );
+      await refreshDatabaseTree(importWizard.payload.connId);
+    } else {
+      await MongoApi.importCollection(
+        importWizard.payload.connId,
+        importWizard.payload.dbName,
+        importWizard.payload.collName,
+        format,
+        payload,
+        importTargetName || importWizard.payload.collName
+      );
+      await refreshDatabaseTree(importWizard.payload.connId, importWizard.payload.dbName);
+    }
+
+    setImportWizard({ open: false, scope: null, payload: null });
+    setImportFile(null);
+    setImportStep(1);
+  }, [importWizard, readImportPayload, importExtension, importTargetName, refreshDatabaseTree]);
+
+  const submitDumpWizard = useCallback(async () => {
+    if (!dumpWizard.payload) return;
+    let result;
+    if (dumpWizard.scope === 'database') {
+      result = await MongoApi.mongodumpDatabase(dumpWizard.payload.connId, dumpWizard.payload.dbName, {
+        includeIndexes: dumpIncludeIndexes,
+        includeMetadata: dumpIncludeMetadata,
+      });
+    } else {
+      result = await MongoApi.mongodumpCollection(dumpWizard.payload.connId, dumpWizard.payload.dbName, dumpWizard.payload.collName, {
+        includeIndexes: dumpIncludeIndexes,
+        includeMetadata: dumpIncludeMetadata,
+      });
+    }
+
+    const fileBase = dumpWizard.scope === 'database'
+      ? `${dumpWizard.payload.dbName}.mongodump.json`
+      : `${dumpWizard.payload.dbName}.${dumpWizard.payload.collName}.mongodump.json`;
+    const blob = new Blob([result.data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileBase;
+    a.click();
+    URL.revokeObjectURL(url);
+    setDumpWizard({ open: false, scope: null, payload: null });
+  }, [dumpWizard, dumpIncludeIndexes, dumpIncludeMetadata]);
+
   return (
     <div className="h-full flex flex-col bg-sidebar text-sidebar-foreground">
       <div className="p-2 border-b border-sidebar-border">
@@ -481,7 +697,13 @@ export default function Explorer({ activeConnections, connections, explorerState
                                 <ContextMenuItem onClick={() => handleDbAction('createCollection', { connId: conn.connectionId, dbName: db.name })}>Create new collection</ContextMenuItem>
                                 <ContextMenuItem onClick={() => handleDbAction('duplicateDb', { connId: conn.connectionId, dbName: db.name })}>Duplicate database</ContextMenuItem>
                                 <ContextMenuItem onClick={() => handleDbAction('exportDatabase', { connId: conn.connectionId, dbName: db.name })}>Export database</ContextMenuItem>
-                                <ContextMenuItem onClick={() => handleDbAction('importDatabase', { connId: conn.connectionId, dbName: db.name })}>Import database</ContextMenuItem>
+                                <ContextMenuItem onClick={() => handleDbAction('importDatabase', { connId: conn.connectionId, dbName: db.name })}>Import database (wizard)</ContextMenuItem>
+                                <ContextMenuItem onClick={() => handleDbAction('mongodumpDatabase', { connId: conn.connectionId, dbName: db.name })}>
+                                  <ArchiveRestore className="w-3.5 h-3.5 mr-2" /> Mongodump database (wizard)
+                                </ContextMenuItem>
+                                <ContextMenuItem onClick={() => handleDbAction('manageUsersRoles', { connId: conn.connectionId, dbName: db.name })}>
+                                  <ShieldCheck className="w-3.5 h-3.5 mr-2" /> Manage Users and Roles
+                                </ContextMenuItem>
                                 <ContextMenuItem onClick={() => handleDbAction('stats', { connId: conn.connectionId, dbName: db.name })}>View database statistics</ContextMenuItem>
                                 <ContextMenuItem onClick={() => handleDbAction('refresh', { connId: conn.connectionId, dbName: db.name })}>
                                   <RefreshCw className="w-3.5 h-3.5 mr-2" /> Refresh
@@ -723,6 +945,280 @@ export default function Explorer({ activeConnections, connections, explorerState
         </DialogContent>
       </Dialog>
 
+      <Dialog open={importWizard.open} onOpenChange={(open) => setImportWizard((prev) => ({ ...prev, open }))}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Import Wizard</DialogTitle>
+            <DialogDescription>
+              Step {importStep} of 3: choose extension, configure file/encoding, and review target.
+            </DialogDescription>
+          </DialogHeader>
+
+          {importStep === 1 && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Select the incoming file extension/type.</p>
+              <div className="grid grid-cols-2 gap-2">
+                {['csv', 'json', 'xml', 'xlsx'].map((ext) => (
+                  <button
+                    key={ext}
+                    type="button"
+                    onClick={() => setImportExtension(ext)}
+                    className={`rounded border px-3 py-2 text-left text-sm ${importExtension === ext ? 'border-primary bg-primary/10' : 'border-border'}`}
+                  >
+                    <div className="font-medium uppercase">{ext}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {ext === 'xlsx' ? 'Excel workbook import' : `Structured ${ext.toUpperCase()} import`}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {importStep === 2 && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Select file and parsing options.</p>
+              <input
+                type="file"
+                accept=".csv,.json,.xml,.xlsx,.xls"
+                className="w-full text-xs"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] || null;
+                  setImportFile(file);
+                  if (file) {
+                    setImportExtension(inferFormatFromFile(file.name, importExtension));
+                  }
+                }}
+              />
+              {isTextImportType && (
+                <div className="space-y-1">
+                  <div className="text-xs font-medium">Text encoding</div>
+                  <select
+                    className="h-9 w-full rounded border border-input bg-background px-2 text-sm"
+                    value={importEncoding}
+                    onChange={(e) => setImportEncoding(e.target.value)}
+                  >
+                    <option value="utf-8">UTF-8</option>
+                    <option value="iso-8859-1">ISO-8859-1</option>
+                    <option value="windows-1252">Windows-1252</option>
+                    <option value="utf-16le">UTF-16 LE</option>
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {importStep === 3 && (
+            <div className="space-y-3">
+              <div className="rounded border border-border p-3 text-xs">
+                <div><strong>Scope:</strong> {importWizard.scope === 'database' ? 'Database import' : 'Collection import'}</div>
+                <div><strong>Extension:</strong> {importExtension.toUpperCase()}</div>
+                <div><strong>Encoding:</strong> {isTextImportType ? importEncoding : 'binary (not required)'}</div>
+              </div>
+              <Input
+                value={importTargetName}
+                onChange={(e) => setImportTargetName(e.target.value)}
+                placeholder={importWizard.scope === 'database' ? 'Target database name' : 'Target collection name'}
+              />
+            </div>
+          )}
+
+          <DialogFooter className="flex gap-2">
+            <Button variant="outline" onClick={() => setImportWizard({ open: false, scope: null, payload: null })}>Cancel</Button>
+            <Button variant="outline" disabled={importStep === 1} onClick={() => setImportStep((prev) => Math.max(1, prev - 1))}>Back</Button>
+            {importStep < 3 ? (
+              <Button onClick={() => setImportStep((prev) => Math.min(3, prev + 1))}>Next</Button>
+            ) : (
+              <Button onClick={submitImportWizard}>Import</Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={dumpWizard.open} onOpenChange={(open) => setDumpWizard((prev) => ({ ...prev, open }))}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Mongodump Wizard</DialogTitle>
+            <DialogDescription>
+              Configure metadata and index options before downloading a `mongodump` style snapshot.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="rounded border border-border p-3 text-xs">
+              <div><strong>Target:</strong> {dumpWizard.scope === 'database' ? dumpWizard.payload?.dbName : `${dumpWizard.payload?.dbName}.${dumpWizard.payload?.collName}`}</div>
+              <div><strong>Type:</strong> {dumpWizard.scope === 'database' ? 'Database dump' : 'Collection dump'}</div>
+            </div>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={dumpIncludeMetadata} onChange={(e) => setDumpIncludeMetadata(e.target.checked)} />
+              Include metadata (stats and technical details)
+            </label>
+            <label className="flex items-center gap-2 text-xs">
+              <input type="checkbox" checked={dumpIncludeIndexes} onChange={(e) => setDumpIncludeIndexes(e.target.checked)} />
+              Include index definitions
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDumpWizard({ open: false, scope: null, payload: null })}>Cancel</Button>
+            <Button onClick={submitDumpWizard}>Generate dump</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={securityWizard.open} onOpenChange={(open) => setSecurityWizard((prev) => ({ ...prev, open }))}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Manage Users and Roles</DialogTitle>
+            <DialogDescription>
+              Detailed security wizard for user creation, role presets, and collection-level access grants.
+            </DialogDescription>
+          </DialogHeader>
+          {securityLoading ? (
+            <div className="py-8 text-center text-xs text-muted-foreground">Loading users and roles...</div>
+          ) : (
+            <div className="grid grid-cols-[220px_1fr] gap-4">
+              <div className="rounded border border-border p-2">
+                <div className="mb-2 text-xs font-medium">Users</div>
+                <div className="max-h-[320px] overflow-auto space-y-1">
+                  {(securityOverview?.users || []).map((user) => (
+                    <button
+                      key={user.user}
+                      type="button"
+                      onClick={() => hydrateSecurityEditor(securityOverview, user.user)}
+                      className={`w-full rounded px-2 py-1 text-left text-xs ${securitySelectedUser === user.user ? 'bg-primary/10 text-primary' : 'hover:bg-secondary/60'}`}
+                    >
+                      {user.user}
+                    </button>
+                  ))}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 w-full h-7 text-xs"
+                  onClick={() => {
+                    setSecuritySelectedUser('');
+                    setSecurityUsername('');
+                    setSecurityPassword('');
+                    setSecurityUserType('custom');
+                    setSecurityPresetRole('');
+                    setSecurityGrants([{ collection: '*', access: 'read' }]);
+                  }}
+                >
+                  New user
+                </Button>
+              </div>
+
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <Input value={securityUsername} onChange={(e) => setSecurityUsername(e.target.value)} placeholder="Username" />
+                  <Input value={securityPassword} onChange={(e) => setSecurityPassword(e.target.value)} placeholder="Password (optional for update)" type="password" />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    className="h-9 w-full rounded border border-input bg-background px-2 text-sm"
+                    value={securityUserType}
+                    onChange={(e) => setSecurityUserType(e.target.value)}
+                  >
+                    <option value="custom">Custom grants and roles</option>
+                    <option value="masterAdmin">Master admin (root)</option>
+                  </select>
+                  <select
+                    className="h-9 w-full rounded border border-input bg-background px-2 text-sm"
+                    value={securityPresetRole}
+                    onChange={(e) => setSecurityPresetRole(e.target.value)}
+                    disabled={securityUserType === 'masterAdmin'}
+                  >
+                    <option value="">Preset role (optional)</option>
+                    {(securityOverview?.presets?.database || []).map((preset) => (
+                      <option key={`${preset.db}.${preset.value}`} value={`${preset.db}::${preset.value}`}>{preset.label}</option>
+                    ))}
+                    {(securityOverview?.presets?.global || []).map((preset) => (
+                      <option key={`${preset.db}.${preset.value}`} value={`${preset.db}::${preset.value}`}>{preset.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="rounded border border-border p-3">
+                  <div className="mb-2 text-xs font-medium">Collection permissions</div>
+                  <div className="space-y-2">
+                    {securityGrants.map((grant, idx) => (
+                      <div key={`grant-${idx}`} className="grid grid-cols-[1fr_160px_40px] gap-2">
+                        <select
+                          className="h-9 rounded border border-input bg-background px-2 text-sm"
+                          value={grant.collection}
+                          onChange={(e) => {
+                            const next = [...securityGrants];
+                            next[idx] = { ...next[idx], collection: e.target.value };
+                            setSecurityGrants(next);
+                          }}
+                          disabled={securityUserType === 'masterAdmin'}
+                        >
+                          <option value="*">All collections (*)</option>
+                          {(securityOverview?.collections || []).map((collectionName) => (
+                            <option key={collectionName} value={collectionName}>{collectionName}</option>
+                          ))}
+                        </select>
+                        <select
+                          className="h-9 rounded border border-input bg-background px-2 text-sm"
+                          value={grant.access}
+                          onChange={(e) => {
+                            const next = [...securityGrants];
+                            next[idx] = { ...next[idx], access: e.target.value };
+                            setSecurityGrants(next);
+                          }}
+                          disabled={securityUserType === 'masterAdmin'}
+                        >
+                          <option value="read">Read</option>
+                          <option value="readWrite">Read + Write</option>
+                        </select>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-9 px-0"
+                          onClick={() => setSecurityGrants((prev) => prev.filter((_, rowIdx) => rowIdx !== idx))}
+                          disabled={securityGrants.length === 1 || securityUserType === 'masterAdmin'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 text-xs"
+                      disabled={securityUserType === 'masterAdmin'}
+                      onClick={() => setSecurityGrants((prev) => [...prev, { collection: '*', access: 'read' }])}
+                    >
+                      Add permission row
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSecurityWizard({ open: false, payload: null })}>Close</Button>
+            <Button
+              variant="outline"
+              className="text-destructive"
+              disabled={!securitySelectedUser}
+              onClick={() => openSecurityConfirm('remove')}
+            >
+              Remove user
+            </Button>
+            <Button
+              disabled={!securityUsername.trim()}
+              onClick={() => openSecurityConfirm('save')}
+            >
+              Save user and permissions
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={statsOpen} onOpenChange={setStatsOpen}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
@@ -745,6 +1241,23 @@ export default function Explorer({ activeConnections, connections, explorerState
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-destructive hover:bg-destructive/90" onClick={submitConfirmAction}>
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={securityConfirm.open} onOpenChange={(open) => setSecurityConfirm((prev) => ({ ...prev, open }))}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm security change</AlertDialogTitle>
+            <AlertDialogDescription>
+              {securityConfirm.message}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={submitSecurityConfirm}>
               Confirm
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -781,12 +1294,13 @@ function CollectionItem({ coll, connId, dbName, onOpenTab, onAction }) {
           <List className="w-3.5 h-3.5 mr-2" /> View Indexes
         </ContextMenuItem>
         <ContextMenuSeparator />
-        <ContextMenuItem onClick={() => onAction('createIndex', { connId, dbName, collName: coll.name })}>Create indexes (wizard)</ContextMenuItem>
+        <ContextMenuItem onClick={() => onAction('createIndex', { connId, dbName, collName: coll.name })}>Create indexes</ContextMenuItem>
         <ContextMenuItem onClick={() => onAction('duplicateCollection', { connId, dbName, collName: coll.name })}>Duplicate collection</ContextMenuItem>
         <ContextMenuItem onClick={() => onAction('renameCollection', { connId, dbName, collName: coll.name })}>Rename collection</ContextMenuItem>
         <ContextMenuItem onClick={() => onAction('stats', { connId, dbName, collName: coll.name })}>View collection statistics</ContextMenuItem>
         <ContextMenuItem onClick={() => onAction('exportCollection', { connId, dbName, collName: coll.name })}>Export collection</ContextMenuItem>
         <ContextMenuItem onClick={() => onAction('importCollection', { connId, dbName, collName: coll.name })}>Import collection</ContextMenuItem>
+        <ContextMenuItem onClick={() => onAction('mongodumpCollection', { connId, dbName, collName: coll.name })}>Mongodump collection</ContextMenuItem>
         <ContextMenuItem onClick={() => onAction('refresh', { connId, dbName, collName: coll.name })}>Refresh</ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem className="text-destructive" onClick={() => onAction('wipeCollection', { connId, dbName, collName: coll.name })}>

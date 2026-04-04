@@ -35,7 +35,8 @@ export function stageToMongo(stage) {
   if (!stage.enabled) return null;
   let parsedBody;
   try {
-    parsedBody = new Function(`return (${stage.body})`)();
+    const objectIdHelper = (hex) => ({ __webmongoObjectId: String(hex || '') });
+    parsedBody = new Function('ObjectId', `return (${stage.body})`)(objectIdHelper);
   } catch {
     return null;
   }

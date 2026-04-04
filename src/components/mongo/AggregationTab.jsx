@@ -1,13 +1,15 @@
-import { useState, useCallback, useMemo } from 'react';
-import { Play, Plus, Download, Upload, Save, RotateCcw, FileJson, Code, StepForward, Zap } from 'lucide-react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { Play, Plus, Download, Upload, RotateCcw, FileJson, Code, StepForward, Zap, Eye } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { MongoApi } from '@/lib/mongo-api';
 import { createStage, pipelineToMongo, pipelineToJSON, pipelineToJS, STAGE_OPERATORS } from '@/lib/stage-config';
 import StageList from './StageList';
 import StageResults from './StageResults';
 import { cn } from '@/lib/utils';
+import { CopyButton } from './JsonViewer';
 
-export default function AggregationTab({ connectionId, database, collection }) {
+export default function AggregationTab({ connectionId, database, collection, tabId, getTabState, setTabState }) {
   const [stages, setStages] = useState([createStage('$match'), createStage('$group')]);
   const [stageResults, setStageResults] = useState([]);
   const [selectedStageIdx, setSelectedStageIdx] = useState(0);
@@ -16,8 +18,42 @@ export default function AggregationTab({ connectionId, database, collection }) {
   const [totalExecTime, setTotalExecTime] = useState(null);
   const [executionMode, setExecutionMode] = useState('full'); // 'full' | 'toStage' | 'step'
   const [dirty, setDirty] = useState(false);
-  const [lastSaved, setLastSaved] = useState(null);
   const [explainData, setExplainData] = useState(null);
+  const [showCodeModal, setShowCodeModal] = useState(false);
+  const [showExplainModal, setShowExplainModal] = useState(false);
+  const hydratedRef = useRef(false);
+
+  useEffect(() => {
+    if (hydratedRef.current || !tabId || !getTabState) return;
+    const saved = getTabState(tabId)?.aggregationState;
+    if (saved) {
+      if (Array.isArray(saved.stages) && saved.stages.length) setStages(saved.stages);
+      if (typeof saved.selectedStageIdx === 'number') setSelectedStageIdx(saved.selectedStageIdx);
+      if (typeof saved.pipelineName === 'string') setPipelineName(saved.pipelineName);
+      if (typeof saved.executionMode === 'string') setExecutionMode(saved.executionMode);
+      if (typeof saved.dirty === 'boolean') setDirty(saved.dirty);
+      if (Array.isArray(saved.stageResults)) setStageResults(saved.stageResults);
+      if (saved.totalExecTime != null) setTotalExecTime(saved.totalExecTime);
+      if (saved.explainData != null) setExplainData(saved.explainData);
+    }
+    hydratedRef.current = true;
+  }, [tabId, getTabState]);
+
+  useEffect(() => {
+    if (!tabId || !setTabState || !hydratedRef.current) return;
+    setTabState(tabId, {
+      aggregationState: {
+        stages,
+        stageResults,
+        selectedStageIdx,
+        pipelineName,
+        totalExecTime,
+        executionMode,
+        dirty,
+        explainData,
+      },
+    });
+  }, [tabId, setTabState, stages, stageResults, selectedStageIdx, pipelineName, totalExecTime, executionMode, dirty, explainData]);
 
   const markDirty = useCallback(() => setDirty(true), []);
 
@@ -69,7 +105,12 @@ export default function AggregationTab({ connectionId, database, collection }) {
   const executePipeline = useCallback(async (mode = 'full', targetIdx = -1) => {
     setExecuting(true);
     const mongoStages = pipelineToMongo(stages);
-    const stopAt = mode === 'full' ? -1 : (targetIdx >= 0 ? targetIdx : selectedStageIdx);
+    const originalTargetIdx = targetIdx >= 0 ? targetIdx : selectedStageIdx;
+    let enabledStageIdx = -1;
+    for (let i = 0; i <= originalTargetIdx && i < stages.length; i += 1) {
+      if (stages[i].enabled) enabledStageIdx += 1;
+    }
+    const stopAt = mode === 'full' ? -1 : enabledStageIdx;
 
     const result = await MongoApi.executeAggregate(connectionId, database, collection, mongoStages, stopAt);
     setStageResults(result.stageResults);
@@ -81,19 +122,17 @@ export default function AggregationTab({ connectionId, database, collection }) {
     const mongoStages = pipelineToMongo(stages);
     const result = await MongoApi.explainPipeline(connectionId, database, collection, mongoStages);
     setExplainData(result);
+    setShowExplainModal(true);
   }, [connectionId, stages, database, collection]);
 
-  const handleSave = useCallback(() => {
-    setLastSaved(JSON.stringify(stages));
-    setDirty(false);
-  }, [stages]);
-
   const handleReset = useCallback(() => {
-    if (lastSaved) {
-      setStages(JSON.parse(lastSaved));
-      setDirty(false);
-    }
-  }, [lastSaved]);
+    setStages([]);
+    setStageResults([]);
+    setSelectedStageIdx(0);
+    setTotalExecTime(null);
+    setExplainData(null);
+    setDirty(false);
+  }, []);
 
   const handleExport = useCallback((format) => {
     const content = format === 'json' ? pipelineToJSON(stages) : pipelineToJS(collection, stages);
@@ -147,6 +186,16 @@ export default function AggregationTab({ connectionId, database, collection }) {
     return stageResults[enabledIdx] || stageResults[stageResults.length - 1];
   }, [stageResults, selectedStageIdx, stages]);
 
+  const fullAggregateCode = useMemo(() => {
+    const enabled = stages.filter((stage) => stage.enabled);
+    const stageLines = enabled.map((stage) => `  { ${JSON.stringify(stage.operator)}: ${stage.body.trim()} }`);
+    return `db.getCollection(${JSON.stringify(collection)}).aggregate([\n${stageLines.join(',\n')}\n])`;
+  }, [stages, collection]);
+
+  const explainJson = useMemo(() => {
+    return explainData ? JSON.stringify(explainData, null, 2) : '';
+  }, [explainData]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Toolbar */}
@@ -171,11 +220,11 @@ export default function AggregationTab({ connectionId, database, collection }) {
           <Button variant="ghost" size="sm" className="h-6 text-[10px] gap-1" onClick={() => handleExport('js')}>
             <Code className="w-3 h-3" /> JS
           </Button>
-          <div className="w-px h-4 bg-border mx-1" />
-          <Button variant="ghost" size="sm" className="h-6 text-[10px] gap-1" onClick={handleSave} disabled={!dirty}>
-            <Save className="w-3 h-3" /> Save
+          <Button variant="ghost" size="sm" className="h-6 text-[10px] gap-1" onClick={() => setShowCodeModal(true)}>
+            <Eye className="w-3 h-3" /> View Code
           </Button>
-          <Button variant="ghost" size="sm" className="h-6 text-[10px] gap-1" onClick={handleReset} disabled={!lastSaved || !dirty}>
+          <div className="w-px h-4 bg-border mx-1" />
+          <Button variant="ghost" size="sm" className="h-6 text-[10px] gap-1" onClick={handleReset}>
             <RotateCcw className="w-3 h-3" /> Reset
           </Button>
           <div className="w-px h-4 bg-border mx-1" />
@@ -233,6 +282,46 @@ export default function AggregationTab({ connectionId, database, collection }) {
           />
         </div>
       </div>
+
+      <Dialog open={showCodeModal} onOpenChange={setShowCodeModal}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Aggregate Code</DialogTitle>
+          </DialogHeader>
+          <div className="relative rounded border border-border bg-secondary/20">
+            <div className="absolute right-2 top-2 z-10">
+              <CopyButton text={fullAggregateCode} />
+            </div>
+            <pre className="max-h-[65vh] overflow-auto p-4 text-xs font-mono leading-5">
+              {fullAggregateCode}
+            </pre>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowCodeModal(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showExplainModal} onOpenChange={setShowExplainModal}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Explain Result</DialogTitle>
+          </DialogHeader>
+          <div className="relative rounded border border-border bg-secondary/20">
+            {explainJson && (
+              <div className="absolute right-2 top-2 z-10">
+                <CopyButton text={explainJson} />
+              </div>
+            )}
+            <pre className="max-h-[65vh] overflow-auto p-4 text-xs font-mono leading-5">
+              {explainJson || 'No explain data available.'}
+            </pre>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowExplainModal(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

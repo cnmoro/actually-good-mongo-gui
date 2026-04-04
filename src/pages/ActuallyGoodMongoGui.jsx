@@ -10,11 +10,13 @@ import CollectionTab from '@/components/mongo/CollectionTab';
 import AggregationTab from '@/components/mongo/AggregationTab';
 import IndexesTab from '@/components/mongo/IndexesTab';
 import ResizeHandle from '@/components/mongo/ResizeHandle';
+import DataTransferDialog from '@/components/mongo/DataTransferDialog';
 import { MongoApi } from '@/lib/mongo-api';
 
 export default function ActuallyGoodMongoGui() {
   const store = useAppStore();
   const [showConnDialog, setShowConnDialog] = useState(false);
+  const [showTransferDialog, setShowTransferDialog] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const handleConnect = useCallback((connId, meta) => {
@@ -89,7 +91,16 @@ export default function ActuallyGoodMongoGui() {
       case 'collection':
         return <CollectionTab connectionId={activeTab.connectionId} database={activeTab.database} collection={activeTab.collection} />;
       case 'aggregation':
-        return <AggregationTab connectionId={activeTab.connectionId} database={activeTab.database} collection={activeTab.collection} />;
+        return (
+          <AggregationTab
+            connectionId={activeTab.connectionId}
+            database={activeTab.database}
+            collection={activeTab.collection}
+            tabId={activeTab.id}
+            getTabState={store.getTabState}
+            setTabState={store.setTabState}
+          />
+        );
       case 'indexes':
         return <IndexesTab connectionId={activeTab.connectionId} database={activeTab.database} collection={activeTab.collection} />;
       default:
@@ -101,6 +112,7 @@ export default function ActuallyGoodMongoGui() {
     <div className="h-screen w-screen flex flex-col bg-background overflow-hidden">
       <Toolbar
         onOpenConnections={() => setShowConnDialog(true)}
+        onOpenDataTransfer={() => setShowTransferDialog(true)}
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
@@ -149,6 +161,11 @@ export default function ActuallyGoodMongoGui() {
         onConnect={handleConnect}
         onSaveConnection={handleSaveConnection}
         onRemoveConnection={store.removeConnection}
+      />
+      <DataTransferDialog
+        open={showTransferDialog}
+        onOpenChange={setShowTransferDialog}
+        connections={store.connections}
       />
     </div>
   );

@@ -265,6 +265,52 @@ export const MongoApi = {
     });
   },
 
+  async mongodumpDatabase(connectionId, dbName, options = {}) {
+    const query = new URLSearchParams({
+      connectionId,
+      includeIndexes: String(options.includeIndexes !== false),
+      includeMetadata: String(options.includeMetadata !== false),
+    });
+    return request(`/databases/${encodeURIComponent(dbName)}/mongodump?${query.toString()}`);
+  },
+
+  async mongodumpCollection(connectionId, dbName, collectionName, options = {}) {
+    const query = new URLSearchParams({
+      connectionId,
+      includeIndexes: String(options.includeIndexes !== false),
+      includeMetadata: String(options.includeMetadata !== false),
+    });
+    return request(
+      `/databases/${encodeURIComponent(dbName)}/collections/${encodeURIComponent(collectionName)}/mongodump?${query.toString()}`
+    );
+  },
+
+  async getSecurityOverview(connectionId, dbName) {
+    const query = new URLSearchParams({ connectionId });
+    return request(`/databases/${encodeURIComponent(dbName)}/security/overview?${query.toString()}`);
+  },
+
+  async upsertDatabaseUser(connectionId, dbName, payload) {
+    return request(`/databases/${encodeURIComponent(dbName)}/security/users`, {
+      method: "PUT",
+      body: JSON.stringify({ connectionId, ...payload }),
+    });
+  },
+
+  async removeDatabaseUser(connectionId, dbName, username) {
+    const query = new URLSearchParams({ connectionId });
+    return request(`/databases/${encodeURIComponent(dbName)}/security/users/${encodeURIComponent(username)}?${query.toString()}`, {
+      method: "DELETE",
+    });
+  },
+
+  async transferData(payload) {
+    return request("/data-transfer", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+
   async getLlmSettings() {
     return request("/settings/llm");
   },

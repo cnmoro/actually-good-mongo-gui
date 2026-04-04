@@ -1,8 +1,8 @@
-import { Plug, Database, Settings, Keyboard, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { Plug, Database, PanelLeftClose, PanelLeft, RefreshCcwDot } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
-export default function Toolbar({ onOpenConnections, sidebarCollapsed, onToggleSidebar }) {
+export default function Toolbar({ onOpenConnections, onOpenDataTransfer, sidebarCollapsed, onToggleSidebar }) {
   return (
     <div className="h-10 bg-secondary/50 border-b border-border flex items-center px-2 gap-1 shrink-0">
       <TooltipProvider delayDuration={200}>
@@ -25,6 +25,16 @@ export default function Toolbar({ onOpenConnections, sidebarCollapsed, onToggleS
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom" className="text-xs">Manage connections</TooltipContent>
+        </Tooltip>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs" onClick={onOpenDataTransfer}>
+              <RefreshCcwDot className="w-3.5 h-3.5" />
+              <span>Data Transfer</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">Transfer database/collection to another connection</TooltipContent>
         </Tooltip>
       </TooltipProvider>
 
