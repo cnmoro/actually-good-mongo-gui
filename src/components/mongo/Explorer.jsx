@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ChevronRight, ChevronDown, Database, Table, Terminal, GitBranch, Search, List, Plug, RefreshCw } from 'lucide-react';
+import { ChevronRight, ChevronDown, Database, Table, Terminal, GitBranch, Search, List, Plug, RefreshCw, Plus, Trash2 } from 'lucide-react';
 import { MongoApi } from '@/lib/mongo-api';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -35,6 +35,26 @@ export default function Explorer({ activeConnections, connections, explorerState
   const [statsText, setStatsText] = useState('');
   const [statsOpen, setStatsOpen] = useState(false);
   const [confirmState, setConfirmState] = useState({ open: false, type: null, payload: null });
+  const [indexName, setIndexName] = useState('');
+  const [indexFields, setIndexFields] = useState([{ field: '', type: '1' }]);
+  const [indexUnique, setIndexUnique] = useState(false);
+  const [indexSparse, setIndexSparse] = useState(false);
+  const [indexHidden, setIndexHidden] = useState(false);
+  const [indexBackground, setIndexBackground] = useState(true);
+  const [indexTtlEnabled, setIndexTtlEnabled] = useState(false);
+  const [indexTtlSeconds, setIndexTtlSeconds] = useState('3600');
+  const [indexPartialEnabled, setIndexPartialEnabled] = useState(false);
+  const [indexPartialFilter, setIndexPartialFilter] = useState('{"status":"ACTIVE"}');
+
+  const INDEX_TYPE_OPTIONS = [
+    { value: '1', label: 'Ascending (1)' },
+    { value: '-1', label: 'Descending (-1)' },
+    { value: 'text', label: 'Text' },
+    { value: 'hashed', label: 'Hashed' },
+    { value: '2dsphere', label: '2dsphere' },
+    { value: '2d', label: '2d' },
+    { value: 'geoHaystack', label: 'GeoHaystack' },
+  ];
 
   const inferFormatFromFile = useCallback((fileName, fallback = 'json') => {
     const name = String(fileName || '').toLowerCase();
@@ -190,6 +210,18 @@ export default function Explorer({ activeConnections, connections, explorerState
       setPromptValue2('');
       setPromptValue3('');
       setImportFile(null);
+      if (type === 'createIndex') {
+        setIndexName('');
+        setIndexFields([{ field: '', type: '1' }]);
+        setIndexUnique(false);
+        setIndexSparse(false);
+        setIndexHidden(false);
+        setIndexBackground(true);
+        setIndexTtlEnabled(false);
+        setIndexTtlSeconds('3600');
+        setIndexPartialEnabled(false);
+        setIndexPartialFilter('{"status":"ACTIVE"}');
+      }
       return;
     }
 
@@ -230,8 +262,42 @@ export default function Explorer({ activeConnections, connections, explorerState
       await refreshDatabaseTree(payload.connId, payload.dbName);
     }
     if (type === 'createIndex') {
-      const keys = promptValue.trim() ? JSON.parse(promptValue) : { _id: 1 };
-      const options = promptValue2.trim() ? JSON.parse(promptValue2) : {};
+      const normalizedFields = indexFields
+        .map((item) => ({ field: item.field.trim(), type: item.type }))
+        .filter((item) => item.field);
+
+      if (!normalizedFields.length) {
+        throw new Error('At least one index field is required');
+      }
+
+      const keys = {};
+      normalizedFields.forEach((item) => {
+        const mappedType = item.type === '1' || item.type === '-1' ? Number(item.type) : item.type;
+        keys[item.field] = mappedType;
+      });
+
+      const options = {
+        background: Boolean(indexBackground),
+      };
+
+      if (indexName.trim()) options.name = indexName.trim();
+      if (indexUnique) options.unique = true;
+      if (indexSparse) options.sparse = true;
+      if (indexHidden) options.hidden = true;
+
+      if (indexTtlEnabled) {
+        const parsedTtl = Number(indexTtlSeconds);
+        if (!Number.isFinite(parsedTtl) || parsedTtl < 0) {
+          throw new Error('TTL must be a valid number of seconds');
+        }
+        options.expireAfterSeconds = parsedTtl;
+      }
+
+      if (indexPartialEnabled) {
+        const partial = JSON.parse(indexPartialFilter || '{}');
+        options.partialFilterExpression = partial;
+      }
+
       await MongoApi.createIndex(payload.connId, payload.dbName, payload.collName, keys, options);
     }
     if (type === 'exportDatabase') {
@@ -459,9 +525,110 @@ export default function Explorer({ activeConnections, connections, explorerState
           )}
 
           {promptState.type === 'createIndex' && (
-            <div className="space-y-2">
-              <Input value={promptValue} onChange={(e) => setPromptValue(e.target.value)} placeholder='Keys JSON, e.g. {"email":1}' />
-              <Input value={promptValue2} onChange={(e) => setPromptValue2(e.target.value)} placeholder='Options JSON, e.g. {"unique":true}' />
+            <div className="space-y-3">
+              <Input
+                value={indexName}
+                onChange={(e) => setIndexName(e.target.value)}
+                placeholder="Index name (optional)"
+              />
+
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground font-medium">Fields</div>
+                {indexFields.map((entry, idx) => (
+                  <div key={`index-field-${idx}`} className="flex items-center gap-2">
+                    <Input
+                      value={entry.field}
+                      onChange={(e) => {
+                        const next = [...indexFields];
+                        next[idx] = { ...next[idx], field: e.target.value };
+                        setIndexFields(next);
+                      }}
+                      placeholder="Field name"
+                    />
+                    <select
+                      className="h-9 min-w-[180px] rounded border border-input bg-background px-2 text-sm"
+                      value={entry.type}
+                      onChange={(e) => {
+                        const next = [...indexFields];
+                        next[idx] = { ...next[idx], type: e.target.value };
+                        setIndexFields(next);
+                      }}
+                    >
+                      {INDEX_TYPE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 px-2"
+                      disabled={indexFields.length === 1}
+                      onClick={() => setIndexFields(indexFields.filter((_, rowIdx) => rowIdx !== idx))}
+                      title="Remove field"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-xs gap-1"
+                  onClick={() => setIndexFields((prev) => [...prev, { field: '', type: '1' }])}
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add field
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={indexUnique} onChange={(e) => setIndexUnique(e.target.checked)} />
+                  Unique
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={indexSparse} onChange={(e) => setIndexSparse(e.target.checked)} />
+                  Sparse
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={indexHidden} onChange={(e) => setIndexHidden(e.target.checked)} />
+                  Hidden
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={indexBackground} onChange={(e) => setIndexBackground(e.target.checked)} />
+                  Create in background
+                </label>
+              </div>
+
+              <div className="space-y-2 rounded border border-border p-2">
+                <label className="flex items-center gap-2 text-xs">
+                  <input type="checkbox" checked={indexTtlEnabled} onChange={(e) => setIndexTtlEnabled(e.target.checked)} />
+                  TTL (expire after)
+                </label>
+                {indexTtlEnabled && (
+                  <Input
+                    value={indexTtlSeconds}
+                    onChange={(e) => setIndexTtlSeconds(e.target.value)}
+                    placeholder="Expire after seconds"
+                  />
+                )}
+              </div>
+
+              <div className="space-y-2 rounded border border-border p-2">
+                <label className="flex items-center gap-2 text-xs">
+                  <input type="checkbox" checked={indexPartialEnabled} onChange={(e) => setIndexPartialEnabled(e.target.checked)} />
+                  Partial index
+                </label>
+                {indexPartialEnabled && (
+                  <textarea
+                    className="w-full min-h-[80px] rounded border border-input bg-background p-2 text-xs font-mono"
+                    value={indexPartialFilter}
+                    onChange={(e) => setIndexPartialFilter(e.target.value)}
+                    placeholder='{"status":"ACTIVE"}'
+                  />
+                )}
+              </div>
             </div>
           )}
 
