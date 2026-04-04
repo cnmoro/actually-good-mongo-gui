@@ -17,6 +17,7 @@
     "desktop:prepare": "npm run icons:generate && npm --prefix ./api install && npm run build",
     "desktop:dist": "npm run desktop:prepare && electron-builder -mwl",
     "desktop:dist:win": "npm run desktop:prepare && electron-builder --win",
+    "desktop:dist:win:ci": "npm run desktop:prepare && electron-builder --win zip",
     "desktop:dist:mac": "npm run desktop:prepare && electron-builder --mac",
     "desktop:dist:linux": "npm run desktop:prepare && electron-builder --linux"
   },
