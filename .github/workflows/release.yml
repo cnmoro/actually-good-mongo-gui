@@ -53,7 +53,10 @@ jobs:
         run: npm ci
 
       - name: Install API dependencies
-        run: npm --prefix ./api install
+        run: npm run api:install
+
+      - name: Rebuild API native modules for Electron
+        run: npm run api:rebuild:electron
 
       - name: Build desktop package
         run: npm run ${{ matrix.platform.script }}
