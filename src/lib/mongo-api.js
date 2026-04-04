@@ -1,4 +1,7 @@
-const API_BASE = "/api";
+const API_BASE =
+  typeof window !== "undefined" && window.location?.protocol === "file:"
+    ? "http://127.0.0.1:8787/api"
+    : "/api";
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {

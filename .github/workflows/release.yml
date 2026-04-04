@@ -1,0 +1,102 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Windows
+            os: windows-latest
+            script: desktop:dist:win
+          - name: macOS
+            os: macos-latest
+            script: desktop:dist:mac
+          - name: Linux
+            os: ubuntu-latest
+            script: desktop:dist:linux
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install API dependencies
+        run: npm --prefix ./api install
+
+      - name: Build desktop package
+        run: npm run ${{ matrix.platform.script }}
+
+      - name: Show release files
+        shell: bash
+        run: |
+          echo "Contents of release/:"
+          ls -la release || true
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform.name }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
+            release/*.deb
+            release/*.zip
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: warn
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-assets
+
+      - name: List downloaded assets
+        run: |
+          echo "Downloaded assets:"
+          find dist-assets -type f | sort
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist-assets/**/*.exe
+            dist-assets/**/*.dmg
+            dist-assets/**/*.AppImage
+            dist-assets/**/*.deb
+            dist-assets/**/*.zip
+            dist-assets/**/*.yml
+            dist-assets/**/*.blockmap
