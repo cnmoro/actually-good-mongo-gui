@@ -126,6 +126,13 @@ export default function Explorer({ activeConnections, connections, explorerState
   }, [loadCollections, loadDatabases]);
 
   const handleConnectionAction = useCallback(async (type, payload) => {
+    if (type === 'createDatabaseWithCollection') {
+      setPromptState({ open: true, type, payload });
+      setPromptValue('');
+      setPromptValue2('');
+      return;
+    }
+
     if (type === 'refresh') {
       setCollections((prev) => {
         const next = { ...prev };
@@ -239,6 +246,19 @@ export default function Explorer({ activeConnections, connections, explorerState
     const { type, payload } = promptState;
     if (!type || !payload) return;
 
+    if (type === 'createDatabaseWithCollection') {
+      const dbName = promptValue.trim();
+      const collectionName = promptValue2.trim();
+      if (!dbName) throw new Error('Database name is required');
+      if (!collectionName) throw new Error('Collection name is required');
+
+      await MongoApi.createCollection(payload.connId, dbName, collectionName);
+      await refreshDatabaseTree(payload.connId, dbName);
+      const dbKey = `${payload.connId}_${dbName}`;
+      toggleExplorerNode(dbKey);
+      await loadCollections(payload.connId, dbName);
+    }
+
     if (type === 'createCollection') {
       await MongoApi.createCollection(payload.connId, payload.dbName, promptValue.trim());
       await refreshDatabaseTree(payload.connId, payload.dbName);
@@ -349,7 +369,7 @@ export default function Explorer({ activeConnections, connections, explorerState
     setPromptValue2('');
     setPromptValue3('');
     setImportFile(null);
-  }, [promptState, promptValue, promptValue2, promptValue3, importFile, inferFormatFromFile, refreshDatabaseTree]);
+  }, [promptState, promptValue, promptValue2, promptValue3, importFile, inferFormatFromFile, loadCollections, refreshDatabaseTree, toggleExplorerNode]);
 
   const submitConfirmAction = useCallback(async () => {
     const { type, payload } = confirmState;
@@ -419,6 +439,10 @@ export default function Explorer({ activeConnections, connections, explorerState
                     </button>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-56">
+                    <ContextMenuItem onClick={() => handleConnectionAction('createDatabaseWithCollection', { connId: conn.connectionId })}>
+                      <Plus className="w-3.5 h-3.5 mr-2" /> Create new database
+                    </ContextMenuItem>
+                    <ContextMenuSeparator />
                     <ContextMenuItem onClick={() => handleConnectionAction('refresh', { connId: conn.connectionId })}>
                       <RefreshCw className="w-3.5 h-3.5 mr-2" /> Refresh connection
                     </ContextMenuItem>
@@ -510,11 +534,26 @@ export default function Explorer({ activeConnections, connections, explorerState
       <Dialog open={promptState.open} onOpenChange={(open) => setPromptState((prev) => ({ ...prev, open }))}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{promptState.type?.includes('Index') ? 'Create Index' : 'Action Parameters'}</DialogTitle>
+            <DialogTitle>{promptState.type?.includes('Index') ? 'Create Index' : (promptState.type === 'createDatabaseWithCollection' ? 'Create Database' : 'Action Parameters')}</DialogTitle>
             <DialogDescription>
               Provide input required for this action.
             </DialogDescription>
           </DialogHeader>
+
+          {promptState.type === 'createDatabaseWithCollection' && (
+            <div className="space-y-2">
+              <Input
+                value={promptValue}
+                onChange={(e) => setPromptValue(e.target.value)}
+                placeholder="Database name"
+              />
+              <Input
+                value={promptValue2}
+                onChange={(e) => setPromptValue2(e.target.value)}
+                placeholder="Initial collection name"
+              />
+            </div>
+          )}
 
           {(promptState.type === 'createCollection' || promptState.type === 'duplicateDb' || promptState.type === 'duplicateCollection' || promptState.type === 'renameCollection' || promptState.type === 'dropDbConfirmName') && (
             <Input
