@@ -19,7 +19,7 @@ jobs:
         platform:
           - name: Windows
             os: windows-latest
-            script: desktop:dist:win
+            script: desktop:dist:win:ci
           - name: macOS
             os: macos-latest
             script: desktop:dist:mac
