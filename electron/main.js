@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from "electron";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs";
 import path from "node:path";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,11 +21,17 @@ function startApiServer() {
   if (apiProcess) return;
 
   const apiEntry = resolveApiEntry();
+  const sqliteDir = app.isPackaged
+    ? path.join(app.getPath("userData"), "api-data")
+    : path.join(__dirname, "..", "api", "data");
+  fs.mkdirSync(sqliteDir, { recursive: true });
+
   apiProcess = spawn(process.execPath, [apiEntry], {
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
       PORT: String(API_PORT),
+      SQLITE_DIR: sqliteDir,
     },
     stdio: "pipe",
   });
