@@ -1,0 +1,17 @@
+{
+  "name": "webmongogui-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "json5": "^2.2.3",
+    "mongodb": "^6.16.0"
+  }
+}
