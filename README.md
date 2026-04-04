@@ -26,8 +26,6 @@ This project is a work in progress. Features are usable today, but the UI/UX and
 
 ## Screenshot Placeholders
 
-Replace each placeholder path with your real screenshot file when ready.
-
 ### 1. Main Workspace (Explorer + Tabs)
 
 ![Main workspace placeholder](docs/screenshots/01-main-workspace.png)
