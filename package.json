@@ -1,7 +1,7 @@
 {
   "name": "webmongo-gui",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
@@ -17,11 +17,11 @@
     "icons:generate": "node ./tools/generate-icons.mjs",
     "desktop:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:5173 && cross-env DESKTOP_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "desktop:prepare": "npm run icons:generate && npm run api:install && npm run api:rebuild:electron && npm run build",
-    "desktop:dist": "npm run desktop:prepare && electron-builder -mwl",
-    "desktop:dist:win": "npm run desktop:prepare && electron-builder --win",
-    "desktop:dist:win:ci": "npm run desktop:prepare && electron-builder --win zip",
-    "desktop:dist:mac": "npm run desktop:prepare && electron-builder --mac",
-    "desktop:dist:linux": "npm run desktop:prepare && electron-builder --linux"
+    "desktop:dist": "npm run desktop:prepare && electron-builder -mwl --publish never",
+    "desktop:dist:win": "npm run desktop:prepare && electron-builder --win --publish never",
+    "desktop:dist:win:ci": "npm run desktop:prepare && electron-builder --win zip --publish never",
+    "desktop:dist:mac": "npm run desktop:prepare && electron-builder --mac --publish never",
+    "desktop:dist:linux": "npm run desktop:prepare && electron-builder --linux --publish never"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^17.0.0",
