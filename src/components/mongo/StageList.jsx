@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react';
-import { GripVertical, X, Copy, Eye, EyeOff, ChevronDown, ChevronRight, Play, Plus, MessageSquare, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { GripVertical, X, Files, Eye, EyeOff, ChevronDown, ChevronRight, Play, Plus, MessageSquare, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
@@ -164,7 +164,7 @@ export default function StageList({
                     <Play className="w-2.5 h-2.5" fill="currentColor" /> Run to here
                   </Button>
                   <Button variant="ghost" size="sm" className="h-5 text-[9px] gap-0.5 px-1.5" onClick={(e) => { e.stopPropagation(); onDuplicateStage(stage.id); }}>
-                    <Copy className="w-2.5 h-2.5" /> Clone
+                    <Files className="w-2.5 h-2.5" /> Clone
                   </Button>
                   <Button variant="ghost" size="sm" className="h-5 text-[9px] gap-0.5 px-1.5" onClick={(e) => { e.stopPropagation(); onAddStage('$match', idx); }}>
                     <Plus className="w-2.5 h-2.5" /> Add after

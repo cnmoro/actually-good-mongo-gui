@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Save, Trash2, Edit, Copy, Download } from 'lucide-react';
+import { X, Save, Trash2, Edit, Copy, Check, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   AlertDialog,
@@ -13,9 +13,10 @@ import {
 } from '@/components/ui/alert-dialog';
 import { JsonValue } from './JsonViewer';
 
-export default function DocumentDrawer({ document: doc, mode, onClose, onSave, onDelete, onEdit, onClone }) {
+export default function DocumentDrawer({ document: doc, mode, onClose, onSave, onDelete, onEdit }) {
   const [editText, setEditText] = useState(JSON.stringify(doc, null, 2));
   const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
   const [pendingSaveDoc, setPendingSaveDoc] = useState(null);
@@ -47,6 +48,27 @@ export default function DocumentDrawer({ document: doc, mode, onClose, onSave, o
     URL.revokeObjectURL(url);
   };
 
+  const handleCopy = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const textToCopy = JSON.stringify(doc, null, 2);
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+    } catch {
+      const el = window.document.createElement('textarea');
+      el.value = textToCopy;
+      el.setAttribute('readonly', '');
+      el.style.position = 'absolute';
+      el.style.left = '-9999px';
+      window.document.body.appendChild(el);
+      el.select();
+      window.document.execCommand('copy');
+      window.document.body.removeChild(el);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
   return (
     <div className="fixed inset-y-0 right-0 w-[480px] bg-card border-l border-border z-[90] flex flex-col shadow-2xl overflow-hidden">
       {/* Header */}
@@ -65,8 +87,18 @@ export default function DocumentDrawer({ document: doc, mode, onClose, onSave, o
               <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={onEdit} title="Edit">
                 <Edit className="w-3 h-3" />
               </Button>
-              <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={onClone} title="Clone">
-                <Copy className="w-3 h-3" />
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 w-6 p-0"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+                onClick={handleCopy}
+                title="Copy JSON"
+              >
+                {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
               </Button>
               <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={handleDownload} title="Download">
                 <Download className="w-3 h-3" />

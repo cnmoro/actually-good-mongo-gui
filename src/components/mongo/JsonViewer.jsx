@@ -118,14 +118,38 @@ function JsonObject({ value, depth }) {
 
 function CopyButton({ text }) {
   const [copied, setCopied] = useState(false);
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(text);
+  const handleCopy = useCallback(async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const textToCopy = typeof text === 'string' ? text : String(text ?? '');
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+    } catch {
+      const el = window.document.createElement('textarea');
+      el.value = textToCopy;
+      el.setAttribute('readonly', '');
+      el.style.position = 'absolute';
+      el.style.left = '-9999px';
+      window.document.body.appendChild(el);
+      el.select();
+      window.document.execCommand('copy');
+      window.document.body.removeChild(el);
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }, [text]);
 
   return (
-    <button onClick={handleCopy} className="p-1 hover:bg-muted rounded transition-colors">
+    <button
+      type="button"
+      onMouseDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={handleCopy}
+      className="p-1 hover:bg-muted rounded transition-colors"
+    >
       {copied ? <Check className="w-3 h-3 text-primary" /> : <Copy className="w-3 h-3 text-muted-foreground" />}
     </button>
   );

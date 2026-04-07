@@ -400,10 +400,6 @@ export default function CollectionTab({ connectionId, database, collection }) {
           onSave={handleSave}
           onDelete={handleDelete}
           onEdit={() => setDrawerMode('edit')}
-          onClone={() => {
-            setDrawerMode('insert');
-            setSelectedDoc({ ...selectedDoc, _id: undefined });
-          }}
         />
       )}
 
