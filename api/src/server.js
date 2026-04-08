@@ -1300,10 +1300,14 @@ app.put("/api/documents", async (req, res, next) => {
     const coll = client.db(database).collection(collection);
 
     const payload = parseLooseJSON(document, {});
-    delete payload._id;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({ error: "Document payload must be a JSON object" });
+    }
 
     const _id = toObjectIdMaybe(docId);
-    await coll.updateOne({ _id }, { $set: payload }, { upsert: false });
+    // PUT behaves as full-document replacement: omitted fields are removed.
+    const replacement = { ...payload, _id };
+    await coll.replaceOne({ _id }, replacement, { upsert: false });
     const found = await coll.findOne({ _id });
 
     if (!found) return res.status(404).json({ error: "Document not found" });
