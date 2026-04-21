@@ -15,11 +15,21 @@ export function useAppStore() {
 
   useEffect(() => {
     async function loadConnections() {
-      try {
-        const saved = await MongoApi.getSavedConnections();
-        setConnections(saved);
-      } catch {
-        setConnections([]);
+      let attempt = 0;
+      while (attempt < 8) {
+        try {
+          const saved = await MongoApi.getSavedConnections();
+          setConnections(saved);
+          return;
+        } catch {
+          attempt += 1;
+          if (attempt >= 8) {
+            setConnections([]);
+            return;
+          }
+          // API can still be booting in packaged desktop startup.
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+        }
       }
     }
     loadConnections();

@@ -381,35 +381,54 @@ function sanitizeRoleToken(value) {
     .slice(0, 80);
 }
 
+function parseMongoShellExpression(source, fallback) {
+  const value = String(source || "").trim();
+  if (!value) return fallback;
+
+  try {
+    const objectIdHelper = (hex) => ({ __webmongoObjectId: String(hex || "") });
+    const parsed = new Function("ObjectId", `return (${value})`)(objectIdHelper);
+    return reviveMongoLiterals(parsed);
+  } catch {
+    return parseLooseJSON(value, fallback);
+  }
+}
+
 function parseShellCommand(command) {
   const trimmed = String(command || "").trim();
-  const findMatch = trimmed.match(/^db\.([A-Za-z0-9_]+)\.find\((.*)\)$/s);
-  if (findMatch) {
-    const args = findMatch[2].trim();
+  const baseMatch = trimmed.match(
+    /^db\.(?:getCollection\((['"])([^'"]+)\1\)|([A-Za-z0-9_]+))\.(find|countDocuments|aggregate)\((.*)\)$/s
+  );
+  if (!baseMatch) return null;
+
+  const collection = baseMatch[2] || baseMatch[3];
+  const operation = baseMatch[4];
+  const argsSource = baseMatch[5] || "";
+
+  if (operation === "find") {
+    const args = argsSource.trim();
     const [rawFilter = "{}", rawProjection] = splitTopLevelArgs(args);
     return {
       type: "find",
-      collection: findMatch[1],
-      filter: parseLooseJSON(rawFilter, {}),
-      projection: rawProjection ? parseLooseJSON(rawProjection, {}) : {},
+      collection,
+      filter: parseMongoShellExpression(rawFilter, {}),
+      projection: rawProjection ? parseMongoShellExpression(rawProjection, {}) : {},
     };
   }
 
-  const countMatch = trimmed.match(/^db\.([A-Za-z0-9_]+)\.countDocuments\((.*)\)$/s);
-  if (countMatch) {
+  if (operation === "countDocuments") {
     return {
       type: "count",
-      collection: countMatch[1],
-      filter: parseLooseJSON(countMatch[2] || "{}", {}),
+      collection,
+      filter: parseMongoShellExpression(argsSource || "{}", {}),
     };
   }
 
-  const aggMatch = trimmed.match(/^db\.([A-Za-z0-9_]+)\.aggregate\((.*)\)$/s);
-  if (aggMatch) {
+  if (operation === "aggregate") {
     return {
       type: "aggregate",
-      collection: aggMatch[1],
-      pipeline: parseLooseJSON(aggMatch[2], []),
+      collection,
+      pipeline: parseMongoShellExpression(argsSource, []),
     };
   }
 

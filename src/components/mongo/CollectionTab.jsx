@@ -57,6 +57,48 @@ function splitTopLevelArgs(argsStr) {
   return args;
 }
 
+function extractMethodArgs(query, methodName) {
+  const marker = `.${methodName}(`;
+  const start = query.indexOf(marker);
+  if (start === -1) return null;
+
+  const argsStart = start + marker.length;
+  let depth = 1;
+  let inString = false;
+  let quote = '';
+
+  for (let i = argsStart; i < query.length; i += 1) {
+    const ch = query[i];
+
+    if (inString) {
+      if (ch === quote && query[i - 1] !== '\\') inString = false;
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      inString = true;
+      quote = ch;
+      continue;
+    }
+
+    if (ch === '(') depth += 1;
+    if (ch === ')') depth -= 1;
+
+    if (depth === 0) {
+      return query.slice(argsStart, i);
+    }
+  }
+
+  throw new Error(`Invalid ${methodName}() syntax`);
+}
+
+function parseMongoExpression(expression, fallback) {
+  const source = String(expression || '').trim();
+  if (!source) return fallback;
+  const objectIdHelper = (hex) => ({ __webmongoObjectId: String(hex || '') });
+  return new Function('ObjectId', `return (${source})`)(objectIdHelper);
+}
+
 function parseCollectionQuery(rawQuery, fallbackCollection) {
   const query = String(rawQuery || '').trim();
   if (!query) throw new Error('Query is empty');
@@ -65,22 +107,22 @@ function parseCollectionQuery(rawQuery, fallbackCollection) {
   const directMatch = query.match(/db\.([A-Za-z0-9_]+)\./);
   const collectionName = getCollectionMatch?.[2] || directMatch?.[1] || fallbackCollection;
 
-  const findMatch = query.match(/\.find\(([^)]*)\)/s);
-  const aggregateMatch = query.match(/\.aggregate\(([^)]*)\)/s);
+  const findArgs = extractMethodArgs(query, 'find');
+  const aggregateArgs = extractMethodArgs(query, 'aggregate');
 
-  if (aggregateMatch) {
-    const pipeline = new Function(`return (${aggregateMatch[1]})`)();
+  if (aggregateArgs != null) {
+    const pipeline = parseMongoExpression(aggregateArgs, []);
     if (!Array.isArray(pipeline)) throw new Error('aggregate() expects an array pipeline');
     return { mode: 'aggregate', collectionName, pipeline };
   }
 
-  if (!findMatch) throw new Error('Supported formats: db.getCollection(...).find(...) or .aggregate(...)');
+  if (findArgs == null) throw new Error('Supported formats: db.getCollection(...).find(...) or .aggregate(...)');
 
-  const args = splitTopLevelArgs(findMatch[1]);
-  const filter = args[0]?.trim() ? new Function(`return (${args[0]})`)() : {};
-  const projection = args[1]?.trim() ? new Function(`return (${args[1]})`)() : {};
+  const args = splitTopLevelArgs(findArgs);
+  const filter = parseMongoExpression(args[0], {});
+  const projection = parseMongoExpression(args[1], {});
 
-  const sortMatch = query.match(/\.sort\(([^)]*)\)/s);
+  const sortArgs = extractMethodArgs(query, 'sort');
   const limitMatch = query.match(/\.limit\((\d+)\)/);
   const skipMatch = query.match(/\.skip\((\d+)\)/);
 
@@ -89,7 +131,7 @@ function parseCollectionQuery(rawQuery, fallbackCollection) {
     collectionName,
     filter,
     projection,
-    sort: sortMatch ? new Function(`return (${sortMatch[1]})`)() : {},
+    sort: sortArgs == null ? {} : parseMongoExpression(sortArgs, {}),
     limit: limitMatch ? Number(limitMatch[1]) : null,
     skip: skipMatch ? Number(skipMatch[1]) : 0,
   };

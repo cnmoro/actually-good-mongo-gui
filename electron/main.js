@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
+import http from "node:http";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,6 +57,44 @@ function stopApiServer() {
   apiProcess = null;
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function checkApiHealth() {
+  return new Promise((resolve) => {
+    const req = http.get(
+      {
+        hostname: "127.0.0.1",
+        port: API_PORT,
+        path: "/health",
+        timeout: 1000,
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode === 200);
+      }
+    );
+
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForApiReady({ timeoutMs = 10000, intervalMs = 200 } = {}) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await checkApiHealth()) return true;
+    await wait(intervalMs);
+  }
+  return false;
+}
+
 function createMainWindow() {
   const window = new BrowserWindow({
     width: 1440,
@@ -85,8 +124,12 @@ function createMainWindow() {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   startApiServer();
+
+  // Avoid racing the renderer against the packaged API boot.
+  await waitForApiReady();
+
   createMainWindow();
 
   app.on("activate", () => {
