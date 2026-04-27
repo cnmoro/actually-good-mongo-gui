@@ -4,6 +4,7 @@ import express from "express";
 import { XMLParser } from "fast-xml-parser";
 import JSON5 from "json5";
 import { MongoClient, ObjectId } from "mongodb";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -381,99 +382,136 @@ function sanitizeRoleToken(value) {
     .slice(0, 80);
 }
 
-function parseMongoShellExpression(source, fallback) {
-  const value = String(source || "").trim();
-  if (!value) return fallback;
+const SHELL_RESULT_BEGIN = "__WMG_SHELL_RESULT_BEGIN__";
+const SHELL_RESULT_END = "__WMG_SHELL_RESULT_END__";
 
+function parseShellWrappedPayload(stdoutText) {
+  const text = String(stdoutText || "");
+  const beginAt = text.lastIndexOf(SHELL_RESULT_BEGIN);
+  if (beginAt === -1) return null;
+  const afterBegin = beginAt + SHELL_RESULT_BEGIN.length;
+  const endAt = text.indexOf(SHELL_RESULT_END, afterBegin);
+  if (endAt === -1) return null;
+  const jsonPayload = text.slice(afterBegin, endAt).trim();
+  if (!jsonPayload) return null;
   try {
-    const objectIdHelper = (hex) => ({ __webmongoObjectId: String(hex || "") });
-    const parsed = new Function("ObjectId", `return (${value})`)(objectIdHelper);
-    return reviveMongoLiterals(parsed);
+    return JSON.parse(jsonPayload);
   } catch {
-    return parseLooseJSON(value, fallback);
+    return null;
   }
 }
 
-function parseShellCommand(command) {
-  const trimmed = String(command || "").trim();
-  const baseMatch = trimmed.match(
-    /^db\.(?:getCollection\((['"])([^'"]+)\1\)|([A-Za-z0-9_]+))\.(find|countDocuments|aggregate)\((.*)\)$/s
-  );
-  if (!baseMatch) return null;
-
-  const collection = baseMatch[2] || baseMatch[3];
-  const operation = baseMatch[4];
-  const argsSource = baseMatch[5] || "";
-
-  if (operation === "find") {
-    const args = argsSource.trim();
-    const [rawFilter = "{}", rawProjection] = splitTopLevelArgs(args);
-    return {
-      type: "find",
-      collection,
-      filter: parseMongoShellExpression(rawFilter, {}),
-      projection: rawProjection ? parseMongoShellExpression(rawProjection, {}) : {},
-    };
-  }
-
-  if (operation === "countDocuments") {
-    return {
-      type: "count",
-      collection,
-      filter: parseMongoShellExpression(argsSource || "{}", {}),
-    };
-  }
-
-  if (operation === "aggregate") {
-    return {
-      type: "aggregate",
-      collection,
-      pipeline: parseMongoShellExpression(argsSource, []),
-    };
-  }
-
-  return null;
-}
-
-function splitTopLevelArgs(argsStr) {
-  const args = [];
-  let depth = 0;
-  let current = "";
-  let inString = false;
-  let quote = "";
-
-  for (let i = 0; i < argsStr.length; i++) {
-    const ch = argsStr[i];
-
-    if (inString) {
-      current += ch;
-      if (ch === quote && argsStr[i - 1] !== "\\") {
-        inString = false;
+function normalizeExtendedJson(value) {
+  if (Array.isArray(value)) return value.map(normalizeExtendedJson);
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value);
+    if (keys.length === 1) {
+      if (Object.prototype.hasOwnProperty.call(value, "$oid")) {
+        return String(value.$oid || "");
       }
-      continue;
+      if (Object.prototype.hasOwnProperty.call(value, "$date")) {
+        const rawDate = value.$date;
+        if (typeof rawDate === "string") return rawDate;
+        if (rawDate && typeof rawDate === "object" && Object.prototype.hasOwnProperty.call(rawDate, "$numberLong")) {
+          const asNum = Number(rawDate.$numberLong);
+          if (Number.isFinite(asNum)) return new Date(asNum).toISOString();
+        }
+      }
     }
 
-    if (ch === '"' || ch === "'") {
-      inString = true;
-      quote = ch;
-      current += ch;
-      continue;
-    }
-
-    if (ch === "{" || ch === "[" || ch === "(") depth += 1;
-    if (ch === "}" || ch === "]" || ch === ")") depth -= 1;
-
-    if (ch === "," && depth === 0) {
-      args.push(current.trim());
-      current = "";
-      continue;
-    }
-
-    current += ch;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = normalizeExtendedJson(v);
+    return out;
   }
+  return value;
+}
 
-  if (current.trim()) args.push(current.trim());
-  return args;
+function buildMongoshEvalScript(database, command) {
+  const dbName = String(database || "admin");
+  const userCommand = String(command || "");
+  return `
+const __dbName = ${JSON.stringify(dbName)};
+if (__dbName) {
+  db = db.getSiblingDB(__dbName);
+}
+const __userCommand = ${JSON.stringify(userCommand)};
+const __resultBegin = ${JSON.stringify(SHELL_RESULT_BEGIN)};
+const __resultEnd = ${JSON.stringify(SHELL_RESULT_END)};
+
+async function __runUserCommand() {
+  try {
+    let __result = eval(__userCommand);
+    if (__result && typeof __result.then === "function") {
+      __result = await __result;
+    }
+    if (__result && typeof __result.toArray === "function") {
+      __result = await __result.toArray();
+    }
+
+    print(__resultBegin + EJSON.stringify({ ok: true, value: __result }, { relaxed: true }) + __resultEnd);
+  } catch (error) {
+    const message = String(error && error.message ? error.message : error);
+    print(__resultBegin + EJSON.stringify({ ok: false, error: message }, { relaxed: true }) + __resultEnd);
+    quit(2);
+  }
+}
+
+__runUserCommand();
+`;
+}
+
+function executeViaMongosh({ uri, database, command, timeoutMs = 30000 }) {
+  const mongoshPath = process.env.MONGOSH_BIN || "mongosh";
+  const script = buildMongoshEvalScript(database, command);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(mongoshPath, [uri, "--quiet", "--norc", "--eval", script], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const settleOnce = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      handler(value);
+    };
+
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+
+    child.on("error", (error) => {
+      settleOnce(reject, error);
+    });
+
+    child.on("close", (code) => {
+      settleOnce(resolve, { code: Number(code ?? 0), stdout, stderr });
+    });
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // no-op
+      }
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // no-op
+        }
+      }, 1000);
+      settleOnce(resolve, { code: 124, stdout, stderr: `${stderr}\nCommand timed out after ${timeoutMs}ms` });
+    }, Math.max(1000, Number(timeoutMs || 30000)));
+  });
 }
 
 function clampLimit(limit, fallback = 50) {
@@ -616,7 +654,11 @@ app.get("/api/databases/:database/collections", async (req, res, next) => {
       })
     );
 
-    res.json(counts.map((c) => ({ ...c, avgDocSize: 0, storageSize: 0 })));
+    const sorted = counts
+      .map((c) => ({ ...c, avgDocSize: 0, storageSize: 0 }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
+
+    res.json(sorted);
   } catch (error) {
     next(error);
   }
@@ -1245,9 +1287,9 @@ app.post("/api/documents/find", async (req, res, next) => {
     const { client } = await getConnectedClientByConnectionId(String(connectionId || ""));
     const coll = client.db(database).collection(collection);
 
-    const parsedFilter = parseLooseJSON(filter, {});
-    const parsedSort = parseLooseJSON(sort, {});
-    const parsedProjection = parseLooseJSON(projection, {});
+    const parsedFilter = reviveMongoLiterals(parseLooseJSON(filter, {}));
+    const parsedSort = reviveMongoLiterals(parseLooseJSON(sort, {}));
+    const parsedProjection = reviveMongoLiterals(parseLooseJSON(projection, {}));
 
     const start = Date.now();
     const safeLimit = clampLimit(limit, 50);
@@ -1457,46 +1499,67 @@ app.post("/api/aggregate/explain", async (req, res, next) => {
 app.post("/api/shell/execute", async (req, res, next) => {
   try {
     const { connectionId, database, command } = req.body || {};
-    const parsed = parseShellCommand(command);
-    if (!parsed) {
-      return res.json({
-        type: "error",
-        output: "Command not recognized. Supported: db.<collection>.find(), .countDocuments(), .aggregate()",
-        executionTime: 0,
-      });
+    const trimmedCommand = String(command || "").trim();
+    if (!trimmedCommand) {
+      return res.json({ type: "error", output: "Command is empty", executionTime: 0 });
     }
 
     const start = Date.now();
-    const { client } = await getConnectedClientByConnectionId(String(connectionId || ""));
-    const coll = client.db(database).collection(parsed.collection);
+    const { uri } = await getConnectedClientByConnectionId(String(connectionId || ""));
+    const run = await executeViaMongosh({
+      uri,
+      database,
+      command: trimmedCommand,
+      timeoutMs: 30000,
+    });
 
-    if (parsed.type === "find") {
-      const docs = await coll
-        .find(parsed.filter || {}, {
-          projection: parsed.projection || {},
-          limit: 50,
-          maxTimeMS: 12000,
-        })
-        .toArray();
+    const wrapped = parseShellWrappedPayload(run.stdout);
+    if (!wrapped) {
+      const output = [run.stdout, run.stderr].filter(Boolean).join("\n").trim() || "Could not read mongosh output";
       return res.json({
-        type: "documents",
-        output: serializeForJson(docs.map((doc) => ({ ...doc, _id: encodeDocId(doc._id) }))),
+        type: "error",
+        output,
         executionTime: Date.now() - start,
       });
     }
 
-    if (parsed.type === "count") {
-      const total = await coll.countDocuments(parsed.filter || {}, { maxTimeMS: 12000 });
-      return res.json({ type: "number", output: total, executionTime: Date.now() - start });
+    if (!wrapped.ok) {
+      return res.json({
+        type: "error",
+        output: wrapped.error || run.stderr || "Query failed",
+        executionTime: Date.now() - start,
+      });
     }
 
-    const rows = await coll
-      .aggregate(parsed.pipeline || [], { allowDiskUse: true, maxTimeMS: 25000 })
-      .limit(100)
-      .toArray();
+    const normalizedValue = normalizeExtendedJson(wrapped.value);
+
+    if (typeof normalizedValue === "number") {
+      return res.json({ type: "number", output: normalizedValue, executionTime: Date.now() - start });
+    }
+
+    if (Array.isArray(normalizedValue)) {
+      return res.json({
+        type: "documents",
+        output: serializeForJson(normalizedValue),
+        executionTime: Date.now() - start,
+      });
+    }
+
+    if (normalizedValue == null) {
+      return res.json({ type: "documents", output: [], executionTime: Date.now() - start });
+    }
+
+    if (typeof normalizedValue === "object") {
+      return res.json({
+        type: "documents",
+        output: serializeForJson([normalizedValue]),
+        executionTime: Date.now() - start,
+      });
+    }
+
     return res.json({
       type: "documents",
-      output: serializeForJson(rows.map((doc) => ({ ...doc, _id: encodeDocId(doc._id) }))),
+      output: serializeForJson([{ value: normalizedValue }]),
       executionTime: Date.now() - start,
     });
   } catch (error) {

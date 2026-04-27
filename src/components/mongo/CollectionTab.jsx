@@ -215,15 +215,53 @@ export default function CollectionTab({ connectionId, database, collection }) {
   }, [page, parsedQuery, fetchDocuments]);
 
   const executeQuery = useCallback(async () => {
+    const trimmedQuery = queryText.trim();
+    if (!trimmedQuery) {
+      setQueryError('Query is empty');
+      return;
+    }
+
     try {
-      const parsed = parseCollectionQuery(queryText, collection);
+      const parsed = parseCollectionQuery(trimmedQuery, collection);
       setParsedQuery(parsed);
       setPage(0);
       await fetchDocuments(parsed, 0);
     } catch (e) {
-      setQueryError(e.message || 'Invalid query');
+      try {
+        const shellResult = await MongoApi.executeShellCommand(connectionId, database, trimmedQuery);
+        if (shellResult?.type === 'error') throw new Error(shellResult.output || 'Query execution failed');
+
+        let docs = [];
+        if (shellResult?.type === 'documents') {
+          docs = Array.isArray(shellResult.output) ? shellResult.output : [];
+        } else if (shellResult?.type === 'number') {
+          docs = [{ value: shellResult.output }];
+        } else if (shellResult?.output != null) {
+          docs = [shellResult.output];
+        }
+
+        setParsedQuery(null);
+        setPage(0);
+        setDocuments(docs);
+        setTotal(docs.length);
+        setExecTime(shellResult?.executionTime || 0);
+        setQueryError(null);
+      } catch (shellError) {
+        setQueryError(shellError.message || e.message || 'Invalid query');
+      }
     }
-  }, [queryText, collection, fetchDocuments]);
+  }, [queryText, collection, fetchDocuments, connectionId, database]);
+
+  useEffect(() => {
+    const handleGlobalRefresh = (e) => {
+      if (e.key !== 'F5') return;
+      e.preventDefault();
+      executeQuery();
+    };
+
+    window.addEventListener('keydown', handleGlobalRefresh);
+    return () => window.removeEventListener('keydown', handleGlobalRefresh);
+  }, [executeQuery]);
 
   const handleDelete = useCallback(async (doc) => {
     await MongoApi.deleteDocument(connectionId, database, collection, doc._id);

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Play, Clock, AlertCircle, Sparkles, Trash2, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MongoApi } from '@/lib/mongo-api';
@@ -92,6 +92,17 @@ export default function ShellTab({ connectionId, database, collection }) {
       setQuery(newIdx >= 0 ? history[newIdx] : '');
     }
   }, [execute, history, historyIdx]);
+
+  useEffect(() => {
+    const handleGlobalRefresh = (e) => {
+      if (e.key !== 'F5') return;
+      e.preventDefault();
+      execute();
+    };
+
+    window.addEventListener('keydown', handleGlobalRefresh);
+    return () => window.removeEventListener('keydown', handleGlobalRefresh);
+  }, [execute]);
 
   const resultDocs = result?.type === 'documents' ? result.output : null;
 
