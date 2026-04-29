@@ -274,12 +274,14 @@ export default function CollectionTab({ connectionId, database, collection }) {
     if (drawerMode === 'insert') {
       await MongoApi.insertDocument(connectionId, database, collection, doc);
     } else {
-      await MongoApi.updateDocument(connectionId, database, collection, doc._id, doc);
+      const targetDocId = selectedDoc?._id;
+      if (!targetDocId) throw new Error('No selected document to update');
+      await MongoApi.updateDocument(connectionId, database, collection, targetDocId, doc);
     }
     await fetchDocuments(parsedQuery, page);
     setSelectedDoc(null);
     setDrawerMode(null);
-  }, [connectionId, database, collection, drawerMode, fetchDocuments, parsedQuery, page]);
+  }, [connectionId, database, collection, drawerMode, fetchDocuments, parsedQuery, page, selectedDoc]);
 
   const appendSnippet = useCallback((snippet) => {
     setQueryText((prev) => {
@@ -462,7 +464,10 @@ export default function CollectionTab({ connectionId, database, collection }) {
             <JsonViewer
               documents={documents}
               viewMode={viewMode}
-              onDocumentClick={(doc) => setSelectedDoc(doc)}
+              onDocumentClick={(doc) => {
+                setSelectedDoc(doc);
+                setDrawerMode('view');
+              }}
               selectedDocumentId={selectedDoc?._id}
             />
           </div>

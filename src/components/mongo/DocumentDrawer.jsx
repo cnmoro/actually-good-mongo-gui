@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X, Save, Trash2, Edit, Copy, Check, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -22,6 +22,13 @@ export default function DocumentDrawer({ document: doc, mode, onClose, onSave, o
   const [pendingSaveDoc, setPendingSaveDoc] = useState(null);
 
   const isEditing = mode === 'edit' || mode === 'insert';
+
+  useEffect(() => {
+    setEditText(JSON.stringify(doc, null, 2));
+    setError(null);
+    setPendingSaveDoc(null);
+    setConfirmSaveOpen(false);
+  }, [doc, mode]);
 
   const handleSave = () => {
     try {
